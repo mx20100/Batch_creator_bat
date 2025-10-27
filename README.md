@@ -20,7 +20,7 @@ A self-contained Windows batch script for converting Excel files to validated CS
 2. Double-click the batch file.
 3. A `.zip` with the same name as your Excel file will be created.
 
-## 🧾 Validation
+## Validation
 Each Excel file must contain the following columns (in order):
 batch, filename, material, part_id, copies, next_step, order_id, technology
 
