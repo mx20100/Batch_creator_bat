@@ -1,6 +1,7 @@
 # AM-Flow Converter
 
 A self-contained Windows batch script for converting Excel files to validated CSV and packaging STL data for AM-Flow modules.
+This also gives me a better understanding of git and cli commands.
 
 ## Features
 - Supports `.xlsx` and `.xlsm`
