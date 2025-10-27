@@ -141,6 +141,8 @@ set "pyfile=%temp%\validate_meta_%random%.py"
 >> "%pyfile%" echo             w = csv.DictWriter(f, fieldnames=required)
 >> "%pyfile%" echo             w.writeheader(); w.writerows(rows)
 >> "%pyfile%" echo         print(f"Corrected {fixed} row(s) with copies=0 or empty.")
+>> "%pyfile%" echo     else:
+>> "%pyfile%" echo         print("No corrections needed.")
 >> "%pyfile%" echo     if errors:
 >> "%pyfile%" echo         print("Validation failed:")
 >> "%pyfile%" echo         for e in errors: print(" ", e)
