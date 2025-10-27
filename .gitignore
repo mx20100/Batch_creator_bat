@@ -1,0 +1,6 @@
+*.zip
+*.stl
+*.csv
+*.xlsx
+*.xlsm
+converter_log.txt
