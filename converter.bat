@@ -16,12 +16,33 @@ REM Step 1: Locate Python or use portable fallback (cached)
 REM ===============================
 set "PYTHON_CMD="
 
-REM --- Try system Python first
+REM --- Try system Python (verify it actually runs and log details)
+set "PYTHON_CMD="
+set "PY_PATH="
+
 for %%P in (py.exe python.exe) do (
-    where %%P >nul 2>&1
-    if not errorlevel 1 (
-        set "PYTHON_CMD=%%P"
-        goto foundPython
+    for /f "usebackq delims=" %%X in (`where %%P 2^>nul`) do (
+        set "PY_PATH=%%X"
+        echo [INFO] Found possible Python: %%X>>"%logfile%"
+        REM --- Check if it's a Microsoft Store alias
+        echo %%X | find /I "WindowsApps" >nul
+        if %errorlevel%==0 (
+            echo [WARN] Ignoring Microsoft Store alias at %%X>>"%logfile%"
+            set "PY_PATH="
+            set "PYTHON_CMD="
+        ) else (
+            REM --- Run version check to confirm it's real
+            for /f "usebackq tokens=* delims=" %%V in (`"%%P --version 2^>nul"`) do (
+                set "vercheck=%%V"
+            )
+            if defined vercheck (
+                set "PYTHON_CMD=%%P"
+                echo [INFO] Valid Python detected at %%X>>"%logfile%"
+                goto foundPython
+            ) else (
+                echo [WARN] %%P did not return a valid version>>"%logfile%"
+            )
+        )
     )
 )
 
@@ -84,6 +105,15 @@ echo Extracting portable Python...
 powershell -Command ^
     "Expand-Archive -Path '%CACHE_PY%' -DestinationPath '%DEST%' -Force"
 
+REM --- Enable imports and pip support in the embedded Python
+set "PTH_FILE="
+for %%F in ("%DEST%\python*._pth") do set "PTH_FILE=%%~fF"
+if exist "%PTH_FILE%" (
+    powershell -Command ^
+        "(Get-Content '%PTH_FILE%') -replace '^[#]*\s*import site','import site' | Set-Content '%PTH_FILE%'"
+    echo [INFO] Enabled import site in "%PTH_FILE%">>"%logfile%"
+)
+
 set "PORTABLE_PY=%DEST%\python.exe"
 if not exist "%PORTABLE_PY%" (
     echo Portable Python setup failed.
@@ -103,9 +133,51 @@ echo [INFO] Python found: %PYTHON_CMD% >> "%logfile%"
 echo.
 
 REM ===============================
-REM Step 2: Ensure xlsx2csv is installed
+REM Step 2: Ensure pip and xlsx2csv are installed
 REM ===============================
-echo Checking for xlsx2csv...
+echo Checking for pip and xlsx2csv...
+
+REM --- Step 2A: Check for pip
+"%PYTHON_CMD%" -m pip --version >nul 2>&1
+if errorlevel 1 (
+    echo pip not found — installing...
+echo [INFO] Installing pip for portable Python >> "%logfile%"
+set "GETPIP=%temp%\get-pip.py"
+
+REM --- Clean up any old file
+if exist "%GETPIP%" del "%GETPIP%" >nul 2>&1
+
+REM --- Download get-pip.py silently and properly write to file
+powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ^
+    "& { $ProgressPreference='SilentlyContinue'; Invoke-WebRequest 'https://bootstrap.pypa.io/get-pip.py' -OutFile \"$env:TEMP\get-pip.py\" }"
+
+REM --- Verify file exists before continuing
+if not exist "%GETPIP%" (
+    echo [ERROR] get-pip.py download failed >> "%logfile%"
+    echo Failed to download get-pip.py.
+    pause
+    exit /b
+)
+
+REM --- Run pip installer inside its folder to avoid cwd issues
+pushd "%temp%"
+"%PYTHON_CMD%" "%GETPIP%" >> "%logfile%" 2>&1
+set "pipresult=%errorlevel%"
+popd
+
+if not "%pipresult%"=="0" (
+    echo [ERROR] Failed to install pip for portable Python >> "%logfile%"
+    echo pip installation failed.
+    pause
+    exit /b
+)
+
+del "%GETPIP%" >nul 2>&1
+echo [INFO] pip installed successfully >> "%logfile%"
+echo pip installed successfully.
+)
+
+REM --- Step 2B: Check for xlsx2csv
 "%PYTHON_CMD%" -m pip show xlsx2csv >nul 2>&1
 if %errorlevel% equ 0 (
     echo xlsx2csv already present.
@@ -113,15 +185,14 @@ if %errorlevel% equ 0 (
 ) else (
     echo Installing xlsx2csv...
     echo [INFO] Installing xlsx2csv >> "%logfile%"
-    "%PYTHON_CMD%" -m ensurepip --default-pip >nul 2>&1
-    "%PYTHON_CMD%" -m pip install --user xlsx2csv >> "%logfile%" 2>&1
+    "%PYTHON_CMD%" -m pip install xlsx2csv >> "%logfile%" 2>&1
     if %errorlevel% neq 0 (
         echo Failed to install xlsx2csv.
         echo [ERROR] xlsx2csv installation failed >> "%logfile%"
         pause
         exit /b
     )
-    echo Installed xlsx2csv.
+    echo Installed xlsx2csv successfully.
     echo [INFO] Installed xlsx2csv >> "%logfile%"
 )
 echo.
