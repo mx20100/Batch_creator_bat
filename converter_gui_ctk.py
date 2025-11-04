@@ -271,6 +271,7 @@ class ConverterGUI(ctk.CTk):
         self.minsize(680, 420)
 
         self.running = False
+        self.success = False
         self.cancel_requested = False
         self.logger: Optional[logging.Logger] = None
         self.log_path: Optional[str] = None
@@ -365,12 +366,24 @@ class ConverterGUI(ctk.CTk):
             self.append_text("Cancellation requested by user.")
 
     def on_close(self) -> None:
-        if self.running:
-            # Allow immediate close anyway
+        """Handle Close button or window X."""
+        try:
+            # Only delete log if run finished successfully
+            if not self.running and self.success:
+                logging.shutdown()
+                if self.log_path and os.path.exists(self.log_path):
+                    try:
+                        os.remove(self.log_path)
+                        self.append_text("(Temporary log file cleaned up on exit.)")
+                    except PermissionError:
+                        self.append_text("(Log file still in use; will remain for review.)")
+                    except Exception as e:
+                        self.append_text(f"(Could not remove log file: {e})")
+        except Exception:
+            pass
+        finally:
             self.destroy()
-        else:
-            self.destroy()
-
+            
     # --- Conversion orchestration ---
 
     def start_conversion(self) -> None:
@@ -527,6 +540,7 @@ class ConverterGUI(ctk.CTk):
             self.append_text("Cleanup complete.")
             logger.info("Cleanup complete.")
 
+            self.success = True
             success = True
             self.set_status("All tasks completed successfully.")
             self.set_step(total_steps, total_steps, "Done")

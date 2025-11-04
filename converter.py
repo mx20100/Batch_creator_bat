@@ -6,6 +6,31 @@ import shutil
 import logging
 from datetime import datetime
 import os, sys
+import subprocess
+import tempfile
+
+def schedule_log_cleanup(log_path: str):
+    """Schedules the log file for deletion after this process exits."""
+    try:
+        # Build a short PowerShell command that waits and deletes
+        ps_command = (
+            f"Start-Sleep -Seconds 1; "
+            f"if (Test-Path '{log_path}') {{ Remove-Item -Force '{log_path}' }}"
+        )
+
+        subprocess.Popen(
+            [
+                "powershell",
+                "-NoProfile",
+                "-WindowStyle", "Hidden",
+                "-Command", ps_command
+            ],
+            creationflags=subprocess.DETACHED_PROCESS,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+    except Exception as e:
+        print(f"(Could not schedule log cleanup: {e})")
 
 # Prevent infinite self-relaunch in PyInstaller or multiprocessing contexts
 if os.environ.get("_CONVERTER_RUNNING") == "1":
@@ -324,22 +349,22 @@ def main() -> int:
         print(repr(e))
         return 1
     finally:
-    logger.info("Converter finished.")
-    self.running = False
-    self.cancel_requested = False
-    self.cancel_button.configure(state="disabled")
-    self.close_button.configure(state="normal")
+        logger.info("Converter finished.")
 
-    # Remove the log file after a successful run or clean cancellation
-    try:
-        if os.path.exists(self.log_path):
-            os.remove(self.log_path)
-            self.append_text("(Temporary log file cleaned up.)")
-    except Exception as cleanup_err:
-        # Log cleanup failure quietly in GUI (no file to log into anymore)
-        self.append_text(f"(Could not remove log file: {cleanup_err})")
+        for handler in logger.handlers[:]:
+            try:
+                handler.flush()
+                handler.close()
+            except Exception:
+                pass
+        logger.handlers.clear()
+        logging.shutdown()
 
-
+        #if success and os.path.exists(log_path):
+        #    schedule_log_cleanup(log_path)
+        #    print("(Temporary log file scheduled for cleanup.)")
+        #elif not success:
+        #    print("(Conversion failed or canceled — log file kept for review.)")
 
 if __name__ == "__main__":
     try:
@@ -347,16 +372,17 @@ if __name__ == "__main__":
     except Exception:
         logging.exception("Fatal unhandled error in converter.")
         exit_code = 1
-    finally:
-        logging.shutdown()
+
+    # Give filesystem time to flush deletions (especially for PyInstaller)
+    import time
+    time.sleep(0.2)
 
     try:
         if sys.stdin is None or not sys.stdin.isatty():
-            import time
             time.sleep(2)
         else:
             input("Press Enter to exit...")
     except Exception:
         pass
 
-    os._exit(exit_code)
+    sys.exit(exit_code)
