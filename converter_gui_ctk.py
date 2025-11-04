@@ -4,13 +4,11 @@ import csv
 import zipfile
 import shutil
 import logging
-from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Tuple
 
 import customtkinter as ctk
 import pandas as pd
 from openpyxl import load_workbook
-
 
 APP_TITLE = "AM-Flow Converter"
 
@@ -24,6 +22,8 @@ REQUIRED_COLUMNS = [
     "order_id",
     "technology",
 ]
+
+MAX_STL_PER_ZIP = 100
 
 
 # ---------------------------
@@ -222,38 +222,6 @@ def validate_and_fix_meta(csv_path: str, logger: logging.Logger) -> bool:
     return True
 
 
-def find_stl_folder(workdir: str, logger: logging.Logger) -> Optional[str]:
-    """
-    Find first subfolder containing at least one .stl file.
-    """
-    for name in sorted(os.listdir(workdir)):
-        path = os.path.join(workdir, name)
-        if os.path.isdir(path):
-            for fname in os.listdir(path):
-                if fname.lower().endswith(".stl"):
-                    logger.info(f"Found STL folder: {path}")
-                    return path
-    logger.error("No STL folder found.")
-    return None
-
-
-def zip_stl_folder(stl_folder: str, zip_path: str, logger: logging.Logger) -> None:
-    """
-    Create a zip archive of all files in the STL folder directly at the root level (no subfolder).
-    """
-    logger.info(f"Creating zip archive {zip_path} from {stl_folder}")
-    base_folder = os.path.abspath(stl_folder)
-
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, dirs, files in os.walk(base_folder):
-            for filename in files:
-                full_path = os.path.join(root, filename)
-                rel_path = os.path.relpath(full_path, base_folder)
-                zf.write(full_path, rel_path)
-
-    logger.info("Zip creation completed.")
-
-
 # ---------------------------
 # GUI application (customtkinter)
 # ---------------------------
@@ -271,7 +239,6 @@ class ConverterGUI(ctk.CTk):
         self.minsize(680, 420)
 
         self.running = False
-        self.success = False
         self.cancel_requested = False
         self.logger: Optional[logging.Logger] = None
         self.log_path: Optional[str] = None
@@ -366,24 +333,12 @@ class ConverterGUI(ctk.CTk):
             self.append_text("Cancellation requested by user.")
 
     def on_close(self) -> None:
-        """Handle Close button or window X."""
-        try:
-            # Only delete log if run finished successfully
-            if not self.running and self.success:
-                logging.shutdown()
-                if self.log_path and os.path.exists(self.log_path):
-                    try:
-                        os.remove(self.log_path)
-                        self.append_text("(Temporary log file cleaned up on exit.)")
-                    except PermissionError:
-                        self.append_text("(Log file still in use; will remain for review.)")
-                    except Exception as e:
-                        self.append_text(f"(Could not remove log file: {e})")
-        except Exception:
-            pass
-        finally:
+        if self.running:
+            # Allow immediate close anyway
             self.destroy()
-            
+        else:
+            self.destroy()
+
     # --- Conversion orchestration ---
 
     def start_conversion(self) -> None:
@@ -411,13 +366,19 @@ class ConverterGUI(ctk.CTk):
         logger = setup_logger(log_path)
         self.logger = logger
 
+        # Create a temporary working folder for intermediate files
+        temp_dir = os.path.join(workdir, "_temp_converter")
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        os.makedirs(temp_dir, exist_ok=True)
+
         self.append_text("Converter started.")
         self.append_text(f"Working directory: {workdir}")
         logger.info(f"Working directory: {workdir}")
 
         success = False
-        meta_path = os.path.join(workdir, "meta.csv")
 
+        # We'll keep the progress bar coarse: 7 logical steps
         total_steps = 7
         step = 0
 
@@ -440,13 +401,14 @@ class ConverterGUI(ctk.CTk):
             self.append_text(f"Found Excel file: {os.path.basename(excel_path)}")
             logger.info(f"Found Excel file: {excel_path}")
 
-            # Step 2: Convert Excel to meta.csv
+            # Step 2: Convert Excel to meta.csv (in temp folder)
             step = 2
             self.set_step(step, total_steps, "Converting Excel to meta.csv")
             self.set_status("Converting Excel to meta.csv...")
             self.update_idletasks()
             self.check_cancel()
 
+            meta_path = os.path.join(temp_dir, "meta.csv")
             self.append_text("Converting Excel to meta.csv...")
             convert_excel_to_csv(excel_path, meta_path, logger)
             if not os.path.exists(meta_path):
@@ -473,79 +435,199 @@ class ConverterGUI(ctk.CTk):
             self.append_text("")
             self.update_idletasks()
 
-            # Step 4: Find STL folder
-            step = 4
-            self.set_step(step, total_steps, "Searching for STL folder")
-            self.set_status("Searching for STL folder...")
-            self.update_idletasks()
-            self.check_cancel()
+            # Load rows from validated meta.csv
+            with open(meta_path, newline="", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
 
-            stl_folder = find_stl_folder(workdir, logger)
-            if not stl_folder:
-                msg = "No folder with STL files found."
-                self.append_text(msg)
-                if os.path.exists(meta_path):
-                    os.remove(meta_path)
-                return
-            self.append_text(f"STL folder found: {os.path.basename(stl_folder)}")
-            self.append_text("")
-            self.update_idletasks()
-
-            # Step 5: Copy meta.csv into STL folder
-            step = 5
-            self.set_step(step, total_steps, "Copying meta.csv into STL folder")
-            self.set_status("Copying meta.csv into STL folder...")
-            self.update_idletasks()
-            self.check_cancel()
-
-            target_meta = os.path.join(stl_folder, "meta.csv")
-            shutil.copy2(meta_path, target_meta)
-            logger.info(f"Copied meta.csv to {target_meta}")
-            self.append_text("Copied meta.csv into STL folder.")
-            self.update_idletasks()
-
-            # Step 6: Create zip archive
-            step = 6
-            self.set_step(step, total_steps, "Creating ZIP archive")
-            self.set_status("Creating ZIP archive...")
-            self.update_idletasks()
-            self.check_cancel()
-
-            zip_name = f"{basename}.zip"
-            zip_path = os.path.join(workdir, zip_name)
-            self.append_text(f"Creating archive: {zip_name}...")
-            zip_stl_folder(stl_folder, zip_path, logger)
-
-            if not os.path.exists(zip_path):
-                msg = "Failed to create ZIP archive."
+            if not rows:
+                msg = "meta.csv contains no data rows."
                 self.append_text(msg)
                 logger.error(msg)
                 return
 
-            self.append_text(f"Created archive: {zip_name}")
+            # Step 4: Group by (batch, material) and check STL files
+            step = 4
+            self.set_step(step, total_steps, "Grouping rows and checking STL files")
+            self.set_status("Grouping rows by batch/material and checking STL files...")
+            self.update_idletasks()
+            self.check_cancel()
+
+            from collections import defaultdict
+
+            group_map: Dict[Tuple[str, str], List[Dict[str, str]]] = defaultdict(list)
+            for row in rows:
+                batch = (row.get("batch") or "").strip()
+                material = (row.get("material") or "").strip()
+                if not batch or not material:
+                    # Should not happen after validation, but be safe
+                    logger.warning(f"Skipping row with missing batch/material: {row}")
+                    continue
+                group_map[(batch, material)].append(row)
+
+            if not group_map:
+                msg = "No valid rows with batch and material found in meta.csv."
+                self.append_text(msg)
+                logger.error(msg)
+                return
+
+            # Map subfolders by name (case-insensitive) -> path
+            material_dirs: Dict[str, str] = {}
+            for name in os.listdir(workdir):
+                path = os.path.join(workdir, name)
+                if os.path.isdir(path):
+                    material_dirs[name.lower()] = path
+
+            groups: List[Dict[str, object]] = []
+
+            for (batch, material), group_rows in sorted(group_map.items(), key=lambda x: (x[0][0], x[0][1])):
+                self.check_cancel()
+                self.append_text(f"Processing batch '{batch}' / material '{material}'...")
+                logger.info(f"Processing group: batch={batch}, material={material}")
+
+                folder = material_dirs.get(material.lower())
+                if not folder:
+                    msg = f"Folder '{material}' not found for batch {batch}."
+                    self.append_text(msg)
+                    logger.error(msg)
+                    return
+
+                existing_rows: List[Dict[str, str]] = []
+                missing_files: List[str] = []
+
+                for row in group_rows:
+                    fname = (row.get("filename") or "").strip()
+                    if not fname:
+                        logger.warning(f"Skipping row with empty filename in batch {batch}, material {material}")
+                        continue
+                    stl_path = os.path.join(folder, fname)
+                    if not os.path.exists(stl_path):
+                        missing_files.append(fname)
+                    else:
+                        existing_rows.append(row)
+
+                if missing_files:
+                    unique_missing = sorted(set(missing_files))
+                    warn_msg = (
+                        f"Batch {batch}, material {material}: "
+                        f"missing STL files removed from meta.csv: {', '.join(unique_missing)}"
+                    )
+                    self.append_text(warn_msg)
+                    logger.warning(warn_msg)
+
+                if not existing_rows:
+                    msg = f"No existing STL files found for batch {batch}, material {material}."
+                    self.append_text(msg)
+                    logger.error(msg)
+                    return
+
+                groups.append(
+                    {
+                        "batch": batch,
+                        "material": material,
+                        "folder": folder,
+                        "rows": existing_rows,
+                    }
+                )
+
+            if not groups:
+                msg = "No usable (batch, material) groups after checking STL files."
+                self.append_text(msg)
+                logger.error(msg)
+                return
+
             self.append_text("")
             self.update_idletasks()
 
-            # Step 7: Cleanup
-            step = 7
+            # Step 5: Create ZIP archives with splitting (max 100 STLs per zip)
+            step = 5
+            self.set_step(step, total_steps, "Creating ZIP archives")
+            self.set_status("Packaging files into ZIP...")
+            self.update_idletasks()
+            self.check_cancel()
+
+            for grp in groups:
+                self.check_cancel()
+
+                batch = grp["batch"]
+                material = grp["material"]
+                folder = grp["folder"]
+                group_rows = grp["rows"]
+                num_parts = len(group_rows)
+
+                safe_material = str(material).replace(" ", "_")
+                self.append_text(
+                    f"Creating ZIP(s) for batch '{batch}', material '{material}' ({num_parts} parts)..."
+                )
+                logger.info(
+                    f"Creating ZIP(s) for batch={batch}, material={material}, parts={num_parts}"
+                )
+
+                # Split into chunks of at most MAX_STL_PER_ZIP
+                chunks: List[List[Dict[str, str]]] = [
+                    group_rows[i : i + MAX_STL_PER_ZIP]
+                    for i in range(0, num_parts, MAX_STL_PER_ZIP)
+                ]
+
+                for idx, chunk in enumerate(chunks, start=1):
+                    self.check_cancel()
+
+                    if len(chunks) == 1:
+                        zip_name = f"{batch}_{safe_material}.zip"
+                        chunk_dir_name = f"{batch}_{safe_material}"
+                    else:
+                        zip_name = f"{batch}_{safe_material}_part{idx}.zip"
+                        chunk_dir_name = f"{batch}_{safe_material}_part{idx}"
+
+                    zip_path = os.path.join(workdir, zip_name)
+                    chunk_dir = os.path.join(temp_dir, chunk_dir_name)
+                    os.makedirs(chunk_dir, exist_ok=True)
+
+                    chunk_meta_path = os.path.join(chunk_dir, "meta.csv")
+
+                    # Write chunk meta.csv
+                    with open(chunk_meta_path, "w", newline="", encoding="utf-8-sig") as f:
+                        writer = csv.DictWriter(f, fieldnames=REQUIRED_COLUMNS)
+                        writer.writeheader()
+                        writer.writerows(chunk)
+
+                    # Create ZIP: meta.csv + STL files at root
+                    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                        zf.write(chunk_meta_path, "meta.csv")
+                        for row in chunk:
+                            fname = (row.get("filename") or "").strip()
+                            if not fname:
+                                continue
+                            stl_path = os.path.join(folder, fname)
+                            if os.path.exists(stl_path):
+                                zf.write(stl_path, os.path.basename(fname))
+
+                    self.append_text(f"  Created {zip_name}")
+                    logger.info(f"Created archive: {zip_path}")
+
+                self.append_text("")
+
+            self.update_idletasks()
+
+            # Step 6: Cleanup temporary files
+            step = 6
             self.set_step(step, total_steps, "Cleaning up temporary files")
             self.set_status("Cleaning up temporary files...")
             self.update_idletasks()
             self.check_cancel()
 
-            if os.path.exists(target_meta):
-                os.remove(target_meta)
-            if os.path.exists(meta_path):
-                os.remove(meta_path)
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
             self.append_text("Cleanup complete.")
             logger.info("Cleanup complete.")
 
-            self.success = True
-            success = True
+            # Step 7: Done
+            step = 7
+            self.set_step(step, total_steps, "Done")
             self.set_status("All tasks completed successfully.")
-            self.set_step(total_steps, total_steps, "Done")
             self.append_text("")
             self.append_text("All tasks completed successfully.")
+            success = True
 
         except RuntimeError as e:
             # Used for user cancellation
@@ -563,7 +645,7 @@ class ConverterGUI(ctk.CTk):
             self.cancel_requested = False
             self.cancel_button.configure(state="disabled")
             self.close_button.configure(state="normal")
-            # Do NOT delete log file; you asked to keep it.
+            # We keep converter_log.txt in the root folder (no automatic deletion).
 
 
 def main():
