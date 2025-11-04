@@ -324,13 +324,21 @@ def main() -> int:
         print(repr(e))
         return 1
     finally:
-        logger.info("Converter finished.")
-        if success:
-            # Delete log file on success, as you requested
-            try:
-                os.remove(log_path)
-            except OSError:
-                pass
+    logger.info("Converter finished.")
+    self.running = False
+    self.cancel_requested = False
+    self.cancel_button.configure(state="disabled")
+    self.close_button.configure(state="normal")
+
+    # Remove the log file after a successful run or clean cancellation
+    try:
+        if os.path.exists(self.log_path):
+            os.remove(self.log_path)
+            self.append_text("(Temporary log file cleaned up.)")
+    except Exception as cleanup_err:
+        # Log cleanup failure quietly in GUI (no file to log into anymore)
+        self.append_text(f"(Could not remove log file: {cleanup_err})")
+
 
 
 if __name__ == "__main__":
