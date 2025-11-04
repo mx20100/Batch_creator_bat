@@ -7,4 +7,3 @@ converter_log.txt
 .venv/
 build/
 *.spec
-dist/
