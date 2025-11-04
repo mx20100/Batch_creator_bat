@@ -136,91 +136,128 @@ def convert_excel_to_csv(
             pass
 
 
-def validate_and_fix_meta(csv_path: str, logger: logging.Logger) -> bool:
+import re
+
+def sanitize_filename(value: str) -> str:
+    """Replace unsupported chars with underscores and collapse duplicates."""
+    sanitized = re.sub(r"[^A-Za-z0-9_.]", "_", value)
+    sanitized = re.sub(r"_+", "_", sanitized)
+    sanitized = sanitized.strip("_ ")
+    return sanitized
+
+
+def validate_and_fix_meta(csv_path: str, stl_folder: str, logger: logging.Logger) -> bool:
     """
-    Validates meta.csv:
+    Validates and sanitizes meta.csv:
     - Header must match REQUIRED_COLUMNS (in order, case-insensitive)
     - Rows with any data must have all required fields filled
     - copies == '' or '0' -> set to '1'
     - filename without '.stl' (case-insensitive) -> append '.stl'
-
-    Returns True if validation passes, False otherwise.
+    - Sanitizes filenames (allowed: A-Z, a-z, 0-9, _, .)
+    - Renames corresponding STL files in stl_folder
+    - Removes rows for missing STL files
     """
-    logger.info("Validating meta.csv...")
+    logger.info("Validating and sanitizing meta.csv...")
 
-    errors: List[str] = []
+    errors: list[str] = []
     fixed_copies = 0
     fixed_filenames = 0
+    sanitized_files = 0
+    renamed_files = 0
+    removed_rows = 0
 
-    # Read
+    # Read meta.csv
     with open(csv_path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
         header = reader.fieldnames
 
     if header is None:
-        print("Validation failed: meta.csv has no header row.")
         logger.error("Validation failed: no header row in meta.csv")
         return False
 
     normalized_header = [h.strip().lower() for h in header[: len(REQUIRED_COLUMNS)]]
     if normalized_header != REQUIRED_COLUMNS:
-        print("Validation failed: header mismatch.")
-        print("Found header:", header)
-        print("Expected:", REQUIRED_COLUMNS)
         logger.error(f"Header mismatch. Found: {header}, Expected: {REQUIRED_COLUMNS}")
         return False
 
-    # Validate rows
-    for i, row in enumerate(rows, start=2):  # Row numbers starting at 2 (after header)
-        if any((row.get(k) or "").strip() for k in row.keys()):
-            # Check required fields
-            missing = [
-                k for k in REQUIRED_COLUMNS if not (row.get(k) or "").strip()
-            ]
-            if missing:
-                msg = f"Row {i}: missing {', '.join(missing)}"
-                errors.append(msg)
-                logger.error(msg)
+    # Map STL files on disk (case-insensitive)
+    stl_files_on_disk = {f.lower(): f for f in os.listdir(stl_folder) if f.lower().endswith(".stl")}
+    cleaned_rows = []
 
-            # Fix copies
-            val = (row.get("copies") or "").strip()
-            if val == "" or val == "0":
-                row["copies"] = "1"
-                fixed_copies += 1
+    for i, row in enumerate(rows, start=2):
+        if not any((row.get(k) or "").strip() for k in row.keys()):
+            continue
 
-            # Fix filename extension
-            fname = (row.get("filename") or "").strip()
-            if fname and not fname.lower().endswith(".stl"):
-                row["filename"] = fname + ".stl"
-                fixed_filenames += 1
+        # Fix copies
+        val = (row.get("copies") or "").strip()
+        if val == "" or val == "0":
+            row["copies"] = "1"
+            fixed_copies += 1
 
-    # Rewrite file if we made fixes
-    if fixed_copies or fixed_filenames:
-        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=REQUIRED_COLUMNS)
-            writer.writeheader()
-            writer.writerows(rows)
-        if fixed_copies:
-            msg = f"Corrected {fixed_copies} row(s) with copies=0 or empty."
-            print(msg)
-            logger.info(msg)
-        if fixed_filenames:
-            msg = f"Corrected {fixed_filenames} row(s) missing .stl in filename."
-            print(msg)
-            logger.info(msg)
+        # Fix and sanitize filename
+        fname = (row.get("filename") or "").strip()
+        if not fname:
+            errors.append(f"Row {i}: missing filename")
+            logger.error(f"Row {i}: missing filename")
+            continue
+
+        if not fname.lower().endswith(".stl"):
+            fname += ".stl"
+            fixed_filenames += 1
+
+        clean_name = sanitize_filename(fname)
+        if clean_name != fname:
+            sanitized_files += 1
+            logger.info(f"Sanitized filename: '{fname}' -> '{clean_name}'")
+
+        # Rename the STL file on disk if necessary
+        original_disk_name = stl_files_on_disk.get(fname.lower()) or stl_files_on_disk.get(clean_name.lower())
+        if original_disk_name:
+            src = os.path.join(stl_folder, original_disk_name)
+            dst = os.path.join(stl_folder, clean_name)
+            if src != dst:
+                try:
+                    os.rename(src, dst)
+                    renamed_files += 1
+                    logger.info(f"Renamed STL file: '{original_disk_name}' -> '{clean_name}'")
+                    # Update disk map
+                    stl_files_on_disk.pop(original_disk_name.lower(), None)
+                    stl_files_on_disk[clean_name.lower()] = clean_name
+                except Exception as e:
+                    logger.error(f"Could not rename '{original_disk_name}' -> '{clean_name}': {e}")
+        else:
+            logger.warning(f"STL file missing for row {i}: {fname} — row removed.")
+            removed_rows += 1
+            continue
+
+        row["filename"] = clean_name
+        cleaned_rows.append(row)
+
+    # Write cleaned CSV
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=REQUIRED_COLUMNS)
+        writer.writeheader()
+        writer.writerows(cleaned_rows)
+
+    # Summary
+    if fixed_copies:
+        logger.info(f"Corrected {fixed_copies} row(s) with copies=0 or empty.")
+    if fixed_filenames:
+        logger.info(f"Added missing .stl extension to {fixed_filenames} filename(s).")
+    if sanitized_files:
+        logger.info(f"Sanitized {sanitized_files} filename(s) with invalid characters.")
+    if renamed_files:
+        logger.info(f"Renamed {renamed_files} STL file(s) on disk to match sanitized names.")
+    if removed_rows:
+        logger.warning(f"Removed {removed_rows} row(s) due to missing STL files.")
 
     if errors:
-        print("Validation failed:")
-        for e in errors:
-            print(" ", e)
         logger.error("Validation failed with errors.")
         return False
 
-    print("Validation passed.")
     logger.info("meta.csv passed validation.")
     return True
-
 
 # ---------------------------
 # GUI application (customtkinter)
@@ -428,9 +465,23 @@ class ConverterGUI(ctk.CTk):
             self.check_cancel()
 
             self.append_text("Validating meta.csv...")
-            if not validate_and_fix_meta(meta_path, logger):
-                self.append_text("Validation failed — see converter_log.txt for details.")
+            stl_folder = None
+            for name in os.listdir(workdir):
+                path = os.path.join(workdir, name)
+                if os.path.isdir(path):
+                    if any(f.lower().endswith(".stl") for f in os.listdir(path)):
+                        stl_folder = path
+                        break
+
+            if not stl_folder:
+                msg = "No folder with STL files found."
+                self.append_text(msg)
+                logger.error(msg)
                 return
+            if not validate_and_fix_meta(meta_path, stl_folder, logger):
+                self.append_text("Validation failed - see converter_log.txt for details.")
+                return
+            
             self.append_text("Validation completed.")
             self.append_text("")
             self.update_idletasks()
