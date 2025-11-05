@@ -24,7 +24,7 @@ REQUIRED_COLUMNS = [
 ]
 
 MAX_STL_PER_ZIP = 100
-Encoding = "utf-8"
+ENCODING = "utf-8"
 MAX_ZIP_SIZE_MB = 900
 MAX_ZIP_SIZE_BYTES = MAX_ZIP_SIZE_MB * 1024 * 1024
 
@@ -43,7 +43,7 @@ def setup_logger(log_path: str) -> logging.Logger:
     # Avoid duplicate handlers if run multiple times
     logger.handlers.clear()
 
-    fh = logging.FileHandler(log_path, encoding=Encoding)
+    fh = logging.FileHandler(log_path, ENCODING=ENCODING)
     fh.setLevel(logging.INFO)
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     fh.setFormatter(formatter)
@@ -115,7 +115,7 @@ def convert_excel_to_csv(
         logger.warning("No visible non-empty worksheets left — falling back to pandas.")
         try:
             df = pd.read_excel(excel_path, engine="openpyxl")
-            df.to_csv(csv_path, index=False, encoding=Encoding)
+            df.to_csv(csv_path, index=False, ENCODING=ENCODING)
             logger.info("Conversion to meta.csv completed using pandas fallback.")
         except Exception as e:
             logger.error(f"All sheets empty or unreadable: {e}")
@@ -124,7 +124,7 @@ def convert_excel_to_csv(
             )
     else:
         logger.info(f"Using worksheet: {ws.title}")
-        with open(csv_path, "w", newline="", encoding=Encoding) as f:
+        with open(csv_path, "w", newline="", ENCODING=ENCODING) as f:
             writer = csv.writer(f)
             for row in ws.iter_rows(values_only=True):
                 writer.writerow(["" if v is None else str(v) for v in row])
@@ -169,7 +169,7 @@ def validate_and_fix_meta(csv_path: str, stl_folder: str, logger: logging.Logger
     removed_rows = 0
 
     # Read meta.csv
-    with open(csv_path, newline="", encoding=Encoding) as f:
+    with open(csv_path, newline="", ENCODING=ENCODING) as f:
         reader = csv.DictReader(f)
         rows = list(reader)
         header = reader.fieldnames
@@ -237,7 +237,7 @@ def validate_and_fix_meta(csv_path: str, stl_folder: str, logger: logging.Logger
         cleaned_rows.append(row)
 
     # Write cleaned CSV
-    with open(csv_path, "w", newline="", encoding=Encoding) as f:
+    with open(csv_path, "w", newline="", ENCODING=ENCODING) as f:
         writer = csv.DictWriter(f, fieldnames=REQUIRED_COLUMNS)
         writer.writeheader()
         writer.writerows(cleaned_rows)
@@ -489,7 +489,7 @@ class ConverterGUI(ctk.CTk):
             self.update_idletasks()
 
             # Load rows from validated meta.csv
-            with open(meta_path, newline="", encoding=Encoding) as f:
+            with open(meta_path, newline="", ENCODING=ENCODING) as f:
                 reader = csv.DictReader(f)
                 rows = list(reader)
 
@@ -664,7 +664,7 @@ class ConverterGUI(ctk.CTk):
                     chunk_meta_path = os.path.join(chunk_dir, "meta.csv")
 
                     # Write chunk meta.csv (UTF-8 without BOM)
-                    with open(chunk_meta_path, "w", newline="", encoding=Encoding) as f:
+                    with open(chunk_meta_path, "w", newline="", ENCODING=ENCODING) as f:
                         writer = csv.DictWriter(f, fieldnames=REQUIRED_COLUMNS)
                         writer.writeheader()
                         writer.writerows(chunk)
@@ -770,7 +770,7 @@ class ConverterGUI(ctk.CTk):
                     chunk_meta_path = os.path.join(chunk_dir, "meta.csv")
 
                     # Write chunk meta.csv
-                    with open(chunk_meta_path, "w", newline="", encoding=Encoding) as f:
+                    with open(chunk_meta_path, "w", newline="", ENCODING=ENCODING) as f:
                         writer = csv.DictWriter(f, fieldnames=REQUIRED_COLUMNS)
                         writer.writeheader()
                         writer.writerows(chunk)
