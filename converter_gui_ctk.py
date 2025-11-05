@@ -24,7 +24,9 @@ REQUIRED_COLUMNS = [
 ]
 
 MAX_STL_PER_ZIP = 100
-
+Encoding = "utf-8"
+MAX_ZIP_SIZE_MB = 900
+MAX_ZIP_SIZE_BYTES = MAX_ZIP_SIZE_MB * 1024 * 1024
 
 # ---------------------------
 # Core (backend) functions
@@ -41,7 +43,7 @@ def setup_logger(log_path: str) -> logging.Logger:
     # Avoid duplicate handlers if run multiple times
     logger.handlers.clear()
 
-    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh = logging.FileHandler(log_path, encoding=Encoding)
     fh.setLevel(logging.INFO)
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     fh.setFormatter(formatter)
@@ -113,7 +115,7 @@ def convert_excel_to_csv(
         logger.warning("No visible non-empty worksheets left — falling back to pandas.")
         try:
             df = pd.read_excel(excel_path, engine="openpyxl")
-            df.to_csv(csv_path, index=False, encoding="utf-8")
+            df.to_csv(csv_path, index=False, encoding=Encoding)
             logger.info("Conversion to meta.csv completed using pandas fallback.")
         except Exception as e:
             logger.error(f"All sheets empty or unreadable: {e}")
@@ -122,7 +124,7 @@ def convert_excel_to_csv(
             )
     else:
         logger.info(f"Using worksheet: {ws.title}")
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        with open(csv_path, "w", newline="", encoding=Encoding) as f:
             writer = csv.writer(f)
             for row in ws.iter_rows(values_only=True):
                 writer.writerow(["" if v is None else str(v) for v in row])
@@ -167,7 +169,7 @@ def validate_and_fix_meta(csv_path: str, stl_folder: str, logger: logging.Logger
     removed_rows = 0
 
     # Read meta.csv
-    with open(csv_path, newline="", encoding="utf-8") as f:
+    with open(csv_path, newline="", encoding=Encoding) as f:
         reader = csv.DictReader(f)
         rows = list(reader)
         header = reader.fieldnames
@@ -235,7 +237,7 @@ def validate_and_fix_meta(csv_path: str, stl_folder: str, logger: logging.Logger
         cleaned_rows.append(row)
 
     # Write cleaned CSV
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+    with open(csv_path, "w", newline="", encoding=Encoding) as f:
         writer = csv.DictWriter(f, fieldnames=REQUIRED_COLUMNS)
         writer.writeheader()
         writer.writerows(cleaned_rows)
@@ -487,7 +489,7 @@ class ConverterGUI(ctk.CTk):
             self.update_idletasks()
 
             # Load rows from validated meta.csv
-            with open(meta_path, newline="", encoding="utf-8") as f:
+            with open(meta_path, newline="", encoding=Encoding) as f:
                 reader = csv.DictReader(f)
                 rows = list(reader)
 
@@ -590,10 +592,122 @@ class ConverterGUI(ctk.CTk):
             self.append_text("")
             self.update_idletasks()
 
-            # Step 5: Create ZIP archives with splitting (max 100 STLs per zip)
+            # Step 5: Create ZIP archives with splitting (max 100 STLs or 900 MB per zip)
             step = 5
             self.set_step(step, total_steps, "Creating ZIP archives")
             self.set_status("Packaging files into ZIP...")
+            self.update_idletasks()
+            self.check_cancel()
+
+            total_zip_count = 0
+            total_zip_size = 0
+            batch_summary = {}
+
+            for grp in groups:
+                self.check_cancel()
+
+                batch = grp["batch"]
+                material = grp["material"]
+                folder = grp["folder"]
+                group_rows = grp["rows"]
+                num_parts = len(group_rows)
+
+                safe_material = str(material).replace(" ", "_")
+                self.append_text(
+                    f"Creating ZIP(s) for batch '{batch}', material '{material}' ({num_parts} parts)..."
+                )
+                logger.info(
+                    f"Creating ZIP(s) for batch={batch}, material={material}, parts={num_parts}"
+                )
+
+                # --- Split by both file count and total size ---
+                chunks: List[List[Dict[str, str]]] = []
+                current_chunk: List[Dict[str, str]] = []
+                current_size = 0
+
+                for row in group_rows:
+                    fname = (row.get("filename") or "").strip()
+                    if not fname:
+                        continue
+                    stl_path = os.path.join(folder, fname)
+                    if not os.path.exists(stl_path):
+                        continue
+                    fsize = os.path.getsize(stl_path)
+                    # Check if adding this file would exceed limits
+                    if (len(current_chunk) >= MAX_STL_PER_ZIP) or (current_size + fsize > MAX_ZIP_SIZE_BYTES):
+                        if current_chunk:
+                            chunks.append(current_chunk)
+                        current_chunk = []
+                        current_size = 0
+                    current_chunk.append(row)
+                    current_size += fsize
+
+                if current_chunk:
+                    chunks.append(current_chunk)
+
+                # --- Create zips for all chunks ---
+                batch_zip_count = 0
+                for idx, chunk in enumerate(chunks, start=1):
+                    self.check_cancel()
+
+                    if len(chunks) == 1:
+                        zip_name = f"{batch}_{safe_material}.zip"
+                        chunk_dir_name = f"{batch}_{safe_material}"
+                    else:
+                        zip_name = f"{batch}_{safe_material}_part{idx}.zip"
+                        chunk_dir_name = f"{batch}_{safe_material}_part{idx}"
+
+                    zip_path = os.path.join(workdir, zip_name)
+                    chunk_dir = os.path.join(temp_dir, chunk_dir_name)
+                    os.makedirs(chunk_dir, exist_ok=True)
+
+                    chunk_meta_path = os.path.join(chunk_dir, "meta.csv")
+
+                    # Write chunk meta.csv (UTF-8 without BOM)
+                    with open(chunk_meta_path, "w", newline="", encoding=Encoding) as f:
+                        writer = csv.DictWriter(f, fieldnames=REQUIRED_COLUMNS)
+                        writer.writeheader()
+                        writer.writerows(chunk)
+
+                    # Create ZIP: meta.csv + STL files at root
+                    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                        zf.write(chunk_meta_path, "meta.csv")
+                        for row in chunk:
+                            fname = (row.get("filename") or "").strip()
+                            if not fname:
+                                continue
+                            stl_path = os.path.join(folder, fname)
+                            if os.path.exists(stl_path):
+                                zf.write(stl_path, os.path.basename(fname))
+
+                    zip_size = os.path.getsize(zip_path)
+                    total_zip_size += zip_size
+                    total_zip_count += 1
+                    batch_zip_count += 1
+
+                    self.append_text(f"  Created {zip_name} ({zip_size/1024/1024:.1f} MB)")
+                    logger.info(f"Created archive: {zip_path} ({zip_size/1024/1024:.2f} MB)")
+
+                batch_summary[batch] = batch_zip_count
+                self.append_text(f"Completed batch '{batch}' — {batch_zip_count} archive(s) created.\n")
+                logger.info(f"Batch '{batch}' completed: {batch_zip_count} zips.")
+
+            self.update_idletasks()
+
+            # --- Final summary ---
+            if total_zip_count:
+                total_gb = total_zip_size / (1024**3)
+                summary_text = (
+                    f"Created {total_zip_count} ZIP file(s) "
+                    f"across {len(batch_summary)} batch(es), "
+                    f"totaling {total_gb:.2f} GB."
+                )
+                self.append_text(summary_text)
+                logger.info(summary_text)
+            else:
+                self.append_text("No ZIP files were created.")
+                logger.warning("No ZIP files created.")
+
             self.update_idletasks()
             self.check_cancel()
 
@@ -614,11 +728,30 @@ class ConverterGUI(ctk.CTk):
                     f"Creating ZIP(s) for batch={batch}, material={material}, parts={num_parts}"
                 )
 
-                # Split into chunks of at most MAX_STL_PER_ZIP
-                chunks: List[List[Dict[str, str]]] = [
-                    group_rows[i : i + MAX_STL_PER_ZIP]
-                    for i in range(0, num_parts, MAX_STL_PER_ZIP)
-                ]
+                # Split into chunks of at most MAX_STL_PER_ZIP or 900 MB total size
+                chunks: List[List[Dict[str, str]]] = []
+                current_chunk: List[Dict[str, str]] = []
+                current_size = 0
+
+                for row in group_rows:
+                    fname = (row.get("filename") or "").strip()
+                    if not fname:
+                        continue
+                    stl_path = os.path.join(folder, fname)
+                    if not os.path.exists(stl_path):
+                        continue
+                    fsize = os.path.getsize(stl_path)
+                    #Would adding this file exceed limits?
+                    if (len(current_chunk) >= MAX_STL_PER_ZIP) or (current_size + fsize > MAX_ZIP_SIZE_BYTES):
+                        if current_chunk:
+                            chunks.append(current_chunk)
+                        current_chunk = []
+                        current_size = 0
+                        current_chunk.append(row)
+                        current_size += fsize
+
+                    if current_chunk:
+                        chunks.append(current_chunk)
 
                 for idx, chunk in enumerate(chunks, start=1):
                     self.check_cancel()
@@ -637,7 +770,7 @@ class ConverterGUI(ctk.CTk):
                     chunk_meta_path = os.path.join(chunk_dir, "meta.csv")
 
                     # Write chunk meta.csv
-                    with open(chunk_meta_path, "w", newline="", encoding="utf-8") as f:
+                    with open(chunk_meta_path, "w", newline="", encoding=Encoding) as f:
                         writer = csv.DictWriter(f, fieldnames=REQUIRED_COLUMNS)
                         writer.writeheader()
                         writer.writerows(chunk)
