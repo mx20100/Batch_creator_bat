@@ -113,7 +113,7 @@ def convert_excel_to_csv(
         logger.warning("No visible non-empty worksheets left — falling back to pandas.")
         try:
             df = pd.read_excel(excel_path, engine="openpyxl")
-            df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+            df.to_csv(csv_path, index=False, encoding="utf-8")
             logger.info("Conversion to meta.csv completed using pandas fallback.")
         except Exception as e:
             logger.error(f"All sheets empty or unreadable: {e}")
@@ -122,7 +122,7 @@ def convert_excel_to_csv(
             )
     else:
         logger.info(f"Using worksheet: {ws.title}")
-        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             for row in ws.iter_rows(values_only=True):
                 writer.writerow(["" if v is None else str(v) for v in row])
@@ -167,7 +167,7 @@ def validate_and_fix_meta(csv_path: str, stl_folder: str, logger: logging.Logger
     removed_rows = 0
 
     # Read meta.csv
-    with open(csv_path, newline="", encoding="utf-8-sig") as f:
+    with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
         header = reader.fieldnames
@@ -235,7 +235,7 @@ def validate_and_fix_meta(csv_path: str, stl_folder: str, logger: logging.Logger
         cleaned_rows.append(row)
 
     # Write cleaned CSV
-    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=REQUIRED_COLUMNS)
         writer.writeheader()
         writer.writerows(cleaned_rows)
@@ -487,7 +487,7 @@ class ConverterGUI(ctk.CTk):
             self.update_idletasks()
 
             # Load rows from validated meta.csv
-            with open(meta_path, newline="", encoding="utf-8-sig") as f:
+            with open(meta_path, newline="", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 rows = list(reader)
 
@@ -637,7 +637,7 @@ class ConverterGUI(ctk.CTk):
                     chunk_meta_path = os.path.join(chunk_dir, "meta.csv")
 
                     # Write chunk meta.csv
-                    with open(chunk_meta_path, "w", newline="", encoding="utf-8-sig") as f:
+                    with open(chunk_meta_path, "w", newline="", encoding="utf-8") as f:
                         writer = csv.DictWriter(f, fieldnames=REQUIRED_COLUMNS)
                         writer.writeheader()
                         writer.writerows(chunk)
