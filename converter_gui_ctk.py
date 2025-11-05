@@ -43,7 +43,7 @@ def setup_logger(log_path: str) -> logging.Logger:
     # Avoid duplicate handlers if run multiple times
     logger.handlers.clear()
 
-    fh = logging.FileHandler(log_path, ENCODING=ENCODING)
+    fh = logging.FileHandler(log_path, encoding=ENCODING)
     fh.setLevel(logging.INFO)
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     fh.setFormatter(formatter)
@@ -115,7 +115,7 @@ def convert_excel_to_csv(
         logger.warning("No visible non-empty worksheets left — falling back to pandas.")
         try:
             df = pd.read_excel(excel_path, engine="openpyxl")
-            df.to_csv(csv_path, index=False, ENCODING=ENCODING)
+            df.to_csv(csv_path, index=False, encoding=ENCODING)
             logger.info("Conversion to meta.csv completed using pandas fallback.")
         except Exception as e:
             logger.error(f"All sheets empty or unreadable: {e}")
@@ -124,7 +124,7 @@ def convert_excel_to_csv(
             )
     else:
         logger.info(f"Using worksheet: {ws.title}")
-        with open(csv_path, "w", newline="", ENCODING=ENCODING) as f:
+        with open(csv_path, "w", newline="", encoding=ENCODING) as f:
             writer = csv.writer(f)
             for row in ws.iter_rows(values_only=True):
                 writer.writerow(["" if v is None else str(v) for v in row])
@@ -147,8 +147,7 @@ def sanitize_filename(value: str) -> str:
     sanitized = sanitized.strip("_ ")
     return sanitized
 
-
-def validate_and_fix_meta(csv_path: str, stl_folder: str, logger: logging.Logger) -> bool:
+def validate_and_fix_meta(csv_path: str, main_folder: str, logger: logging.Logger) -> bool:
     """
     Validates and sanitizes meta.csv:
     - Header must match REQUIRED_COLUMNS (in order, case-insensitive)
@@ -156,10 +155,10 @@ def validate_and_fix_meta(csv_path: str, stl_folder: str, logger: logging.Logger
     - copies == '' or '0' -> set to '1'
     - filename without '.stl' (case-insensitive) -> append '.stl'
     - Sanitizes filenames (allowed: A-Z, a-z, 0-9, _, .)
-    - Renames corresponding STL files in stl_folder
+    - Renames corresponding STL files in main_folder and subfolders
     - Removes rows for missing STL files
     """
-    logger.info("Validating and sanitizing meta.csv...")
+    logger.info("Validating and sanitizing meta.csv (including subfolders)...")
 
     errors: list[str] = []
     fixed_copies = 0
@@ -168,8 +167,8 @@ def validate_and_fix_meta(csv_path: str, stl_folder: str, logger: logging.Logger
     renamed_files = 0
     removed_rows = 0
 
-    # Read meta.csv
-    with open(csv_path, newline="", ENCODING=ENCODING) as f:
+    # --- Load CSV ---
+    with open(csv_path, newline="", encoding=ENCODING) as f:
         reader = csv.DictReader(f)
         rows = list(reader)
         header = reader.fieldnames
@@ -183,8 +182,15 @@ def validate_and_fix_meta(csv_path: str, stl_folder: str, logger: logging.Logger
         logger.error(f"Header mismatch. Found: {header}, Expected: {REQUIRED_COLUMNS}")
         return False
 
-    # Map STL files on disk (case-insensitive)
-    stl_files_on_disk = {f.lower(): f for f in os.listdir(stl_folder) if f.lower().endswith(".stl")}
+    # --- Collect STL files from main_folder + all subfolders ---
+    stl_files_on_disk = {}
+    for root, _, files in os.walk(main_folder):
+        for f in files:
+            if f.lower().endswith(".stl"):
+                stl_files_on_disk[f.lower()] = os.path.join(root, f)
+
+    logger.info(f"Found {len(stl_files_on_disk)} STL file(s) across all folders for validation.")
+
     cleaned_rows = []
 
     for i, row in enumerate(rows, start=2):
@@ -213,21 +219,21 @@ def validate_and_fix_meta(csv_path: str, stl_folder: str, logger: logging.Logger
             sanitized_files += 1
             logger.info(f"Sanitized filename: '{fname}' -> '{clean_name}'")
 
-        # Rename the STL file on disk if necessary
-        original_disk_name = stl_files_on_disk.get(fname.lower()) or stl_files_on_disk.get(clean_name.lower())
-        if original_disk_name:
-            src = os.path.join(stl_folder, original_disk_name)
-            dst = os.path.join(stl_folder, clean_name)
-            if src != dst:
+        # Rename STL file on disk if necessary
+        original_disk_path = stl_files_on_disk.get(fname.lower()) or stl_files_on_disk.get(clean_name.lower())
+        if original_disk_path:
+            root_folder = os.path.dirname(original_disk_path)
+            new_path = os.path.join(root_folder, clean_name)
+            if original_disk_path != new_path:
                 try:
-                    os.rename(src, dst)
+                    os.rename(original_disk_path, new_path)
                     renamed_files += 1
-                    logger.info(f"Renamed STL file: '{original_disk_name}' -> '{clean_name}'")
-                    # Update disk map
-                    stl_files_on_disk.pop(original_disk_name.lower(), None)
-                    stl_files_on_disk[clean_name.lower()] = clean_name
+                    logger.info(f"Renamed STL file: '{os.path.basename(original_disk_path)}' -> '{clean_name}'")
+                    # Update the disk map
+                    stl_files_on_disk.pop(fname.lower(), None)
+                    stl_files_on_disk[clean_name.lower()] = new_path
                 except Exception as e:
-                    logger.error(f"Could not rename '{original_disk_name}' -> '{clean_name}': {e}")
+                    logger.error(f"Could not rename '{original_disk_path}' -> '{new_path}': {e}")
         else:
             logger.warning(f"STL file missing for row {i}: {fname} — row removed.")
             removed_rows += 1
@@ -236,13 +242,13 @@ def validate_and_fix_meta(csv_path: str, stl_folder: str, logger: logging.Logger
         row["filename"] = clean_name
         cleaned_rows.append(row)
 
-    # Write cleaned CSV
-    with open(csv_path, "w", newline="", ENCODING=ENCODING) as f:
+    # --- Write cleaned CSV ---
+    with open(csv_path, "w", newline="", encoding=ENCODING) as f:
         writer = csv.DictWriter(f, fieldnames=REQUIRED_COLUMNS)
         writer.writeheader()
         writer.writerows(cleaned_rows)
 
-    # Summary
+    # --- Summary ---
     if fixed_copies:
         logger.info(f"Corrected {fixed_copies} row(s) with copies=0 or empty.")
     if fixed_filenames:
@@ -253,12 +259,11 @@ def validate_and_fix_meta(csv_path: str, stl_folder: str, logger: logging.Logger
         logger.info(f"Renamed {renamed_files} STL file(s) on disk to match sanitized names.")
     if removed_rows:
         logger.warning(f"Removed {removed_rows} row(s) due to missing STL files.")
-
     if errors:
         logger.error("Validation failed with errors.")
         return False
 
-    logger.info("meta.csv passed validation.")
+    logger.info("meta.csv passed validation (root + subfolders).")
     return True
 
 # ---------------------------
@@ -489,7 +494,7 @@ class ConverterGUI(ctk.CTk):
             self.update_idletasks()
 
             # Load rows from validated meta.csv
-            with open(meta_path, newline="", ENCODING=ENCODING) as f:
+            with open(meta_path, newline="", encoding=ENCODING) as f:
                 reader = csv.DictReader(f)
                 rows = list(reader)
 
@@ -533,18 +538,19 @@ class ConverterGUI(ctk.CTk):
 
             groups: List[Dict[str, object]] = []
 
+            # Gather all STL files in root folder first
+            root_stl_files = {
+                f.lower(): os.path.join(workdir, f)
+                for f in os.listdir(workdir)
+                if f.lower().endswith(".stl")
+            }
+
             for (batch, material), group_rows in sorted(group_map.items(), key=lambda x: (x[0][0], x[0][1])):
                 self.check_cancel()
-                self.append_text(f"Processing batch '{batch}' / material '{material}'...")
+                self.append_text(f"processing batch '{batch}' / material '{material}'...")
                 logger.info(f"Processing group: batch={batch}, material={material}")
 
                 folder = material_dirs.get(material.lower())
-                if not folder:
-                    msg = f"Folder '{material}' not found for batch {batch}."
-                    self.append_text(msg)
-                    logger.error(msg)
-                    return
-
                 existing_rows: List[Dict[str, str]] = []
                 missing_files: List[str] = []
 
@@ -553,15 +559,29 @@ class ConverterGUI(ctk.CTk):
                     if not fname:
                         logger.warning(f"Skipping row with empty filename in batch {batch}, material {material}")
                         continue
-                    stl_path = os.path.join(folder, fname)
-                    if not os.path.exists(stl_path):
+
+                    # Try to find the STL file - prefer material folder, fallback to root
+                    stl_path = None
+                    if folder:
+                        candidate = os.path.join(folder, fname)
+                        if os.path.exists(candidate):
+                            stl_path = candidate
+
+                    if not stl_path and fname.lower() in root_stl_files:
+                        stl_path = root_stl_files[fname.lower()]
+                        if not folder:
+                            # Treat as root-only group (skip material folder requirement)
+                            folder = None
+                            material = "__ROOT__"
+
+                    if not stl_path:
                         missing_files.append(fname)
                     else:
                         existing_rows.append(row)
 
                 if missing_files:
                     unique_missing = sorted(set(missing_files))
-                    warn_msg = (
+                    warn_msg =(
                         f"Batch {batch}, material {material}: "
                         f"missing STL files removed from meta.csv: {', '.join(unique_missing)}"
                     )
@@ -572,7 +592,7 @@ class ConverterGUI(ctk.CTk):
                     msg = f"No existing STL files found for batch {batch}, material {material}."
                     self.append_text(msg)
                     logger.error(msg)
-                    return
+                    continue
 
                 groups.append(
                     {
@@ -646,16 +666,21 @@ class ConverterGUI(ctk.CTk):
                     chunks.append(current_chunk)
 
                 # --- Create zips for all chunks ---
+                if material == "__ROOT__":
+                    safe_material = ""
+                else:
+                    safe_material = str(material).replace(" ", "_")
+
                 batch_zip_count = 0
                 for idx, chunk in enumerate(chunks, start=1):
                     self.check_cancel()
 
                     if len(chunks) == 1:
-                        zip_name = f"{batch}_{safe_material}.zip"
-                        chunk_dir_name = f"{batch}_{safe_material}"
+                        zip_name = f"{batch}{'_' + safe_material if safe_material else ''}.zip"
+                        chunk_dir_name = f"{batch}{'_' + safe_material if safe_material else ''}"
                     else:
-                        zip_name = f"{batch}_{safe_material}_part{idx}.zip"
-                        chunk_dir_name = f"{batch}_{safe_material}_part{idx}"
+                        zip_name = f"{batch}{'_' + safe_material if safe_material else ''}_part{idx}.zip"
+                        chunk_dir_name = f"{batch}{'_' + safe_material if safe_material else ''}_part{idx}"
 
                     zip_path = os.path.join(workdir, zip_name)
                     chunk_dir = os.path.join(temp_dir, chunk_dir_name)
@@ -664,7 +689,7 @@ class ConverterGUI(ctk.CTk):
                     chunk_meta_path = os.path.join(chunk_dir, "meta.csv")
 
                     # Write chunk meta.csv (UTF-8 without BOM)
-                    with open(chunk_meta_path, "w", newline="", ENCODING=ENCODING) as f:
+                    with open(chunk_meta_path, "w", newline="", encoding=ENCODING) as f:
                         writer = csv.DictWriter(f, fieldnames=REQUIRED_COLUMNS)
                         writer.writeheader()
                         writer.writerows(chunk)
@@ -770,7 +795,7 @@ class ConverterGUI(ctk.CTk):
                     chunk_meta_path = os.path.join(chunk_dir, "meta.csv")
 
                     # Write chunk meta.csv
-                    with open(chunk_meta_path, "w", newline="", ENCODING=ENCODING) as f:
+                    with open(chunk_meta_path, "w", newline="", encoding=ENCODING) as f:
                         writer = csv.DictWriter(f, fieldnames=REQUIRED_COLUMNS)
                         writer.writeheader()
                         writer.writerows(chunk)
