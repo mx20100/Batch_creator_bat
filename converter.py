@@ -4,67 +4,53 @@ import csv
 import zipfile
 import shutil
 import logging
+from openpyxl import load_workbook
 from datetime import datetime
-import os, sys
-import subprocess
-import tempfile
 
-def schedule_log_cleanup(log_path: str):
-    """Schedules the log file for deletion after this process exits."""
-    try:
-        # Build a short PowerShell command that waits and deletes
-        ps_command = (
-            f"Start-Sleep -Seconds 1; "
-            f"if (Test-Path '{log_path}') {{ Remove-Item -Force '{log_path}' }}"
-        )
+# ------------------------------------------------------------
+# Cooperative cancellation support
+# ------------------------------------------------------------
+CANCEL_FLAG = False
 
-        subprocess.Popen(
-            [
-                "powershell",
-                "-NoProfile",
-                "-WindowStyle", "Hidden",
-                "-Command", ps_command
-            ],
-            creationflags=subprocess.DETACHED_PROCESS,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-    except Exception as e:
-        print(f"(Could not schedule log cleanup: {e})")
+def request_cancel():
+    """Called by the GUI to request graceful cancellation."""
+    global CANCEL_FLAG
+    CANCEL_FLAG = True
 
-# Prevent infinite self-relaunch in PyInstaller or multiprocessing contexts
-if os.environ.get("_CONVERTER_RUNNING") == "1":
-    # If this process was already launched once, don't rerun main()
-    sys.exit(0)
-else:
-    os.environ["_CONVERTER_RUNNING"] = "1"
-
-try:
-    from openpyxl import load_workbook
-except ImportError:
-    print("Error: 'openpyxl' is not installed.")
-    print("Install it with:  pip install openpyxl")
-    input("Press Enter to exit...")
-    sys.exit(1)
+def check_cancel():
+    """Raises if a cancellation was requested."""
+    if CANCEL_FLAG:
+        raise RuntimeError("Conversion cancelled by user.")
 
 
-REQUIRED_COLUMNS = ['batch', 'filename', 'material', 'part_id',
-                    'copies', 'next_step', 'order_id', 'technology']
+# ------------------------------------------------------------
+# Core configuration
+# ------------------------------------------------------------
+REQUIRED_COLUMNS = [
+    "batch", "filename", "material", "part_id",
+    "copies", "next_step", "order_id", "technology"
+]
+
+ENCODING = "utf-8"
+MAX_ZIP_SIZE_MB = 900
+MAX_ZIP_SIZE_BYTES = MAX_ZIP_SIZE_MB * 1024 * 1024
 
 
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
 def get_working_dir() -> str:
-    # Use the current working directory (where the user runs the EXE / script)
+    """Use current working directory."""
     return os.getcwd()
-
 
 def setup_logger(log_path: str) -> logging.Logger:
     logger = logging.getLogger("converter")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
 
-    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh = logging.FileHandler(log_path, encoding=ENCODING)
     fh.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     fh.setFormatter(formatter)
     logger.addHandler(fh)
 
@@ -72,193 +58,138 @@ def setup_logger(log_path: str) -> logging.Logger:
     logger.info("Converter started")
     return logger
 
-
-def find_excel_file(workdir: str) -> str | None:
-    # First look for .xlsx, then .xlsm
-    for ext in (".xlsx", ".xlsm"):
-        candidates = [f for f in os.listdir(workdir)
-                      if f.lower().endswith(ext)]
-        if candidates:
-            # Take the first in sorted order for determinism
-            candidates.sort()
-            return os.path.join(workdir, candidates[0])
-    return None
-
-
+# ------------------------------------------------------------
+# Excel → CSV
+# ------------------------------------------------------------
 def convert_excel_to_csv(excel_path: str, csv_path: str, logger: logging.Logger) -> None:
+    """Convert first non-empty sheet to CSV."""
     import pandas as pd
-
     logger.info(f"Converting Excel to CSV: {excel_path} -> {csv_path}")
 
     wb = load_workbook(excel_path, data_only=True)
-    removed_sheets = 0
-
-    # Remove empty sheets
+    removed = 0
     for sheet in wb.sheetnames[:]:
         ws = wb[sheet]
-        nonempty = False
-        for row in ws.iter_rows(values_only=True):
-            if any(cell not in (None, "", " ") for cell in row):
-                nonempty = True
-                break
-        if not nonempty:
+        if not any(any(cell not in (None, "", " ") for cell in row) for row in ws.iter_rows(values_only=True)):
             wb.remove(ws)
-            removed_sheets += 1
             logger.info(f"Removed empty sheet: {sheet}")
+            removed += 1
 
-    if removed_sheets:
-        logger.info(f"Removed {removed_sheets} empty sheet(s) before conversion.")
-        # Save cleaned workbook to a temporary file so openpyxl can read it again safely
-        tmp_excel = os.path.join(os.path.dirname(excel_path), "_cleaned_" + os.path.basename(excel_path))
-        wb.save(tmp_excel)
+    if removed:
+        tmp = os.path.join(os.path.dirname(excel_path), "_cleaned_" + os.path.basename(excel_path))
+        wb.save(tmp)
         wb.close()
-        wb = load_workbook(tmp_excel, data_only=True, read_only=True)
+        wb = load_workbook(tmp, data_only=True, read_only=True)
 
-    # Pick the first visible worksheet
-    ws = None
-    for sheet in wb.worksheets:
-        if sheet.sheet_state == "visible":
-            ws = sheet
-            break
-
+    ws = next((s for s in wb.worksheets if s.sheet_state == "visible"), None)
     if ws is None:
-        logger.warning("No visible non-empty worksheets left — falling back to pandas.")
-        try:
-            df = pd.read_excel(excel_path, engine="openpyxl")
-            df.to_csv(csv_path, index=False, encoding="utf-8-sig")
-            logger.info("Conversion to meta.csv completed using pandas fallback.")
-            return
-        except Exception as e:
-            logger.error(f"All sheets empty or unreadable: {e}")
-            raise ValueError(f"No usable worksheets found in '{os.path.basename(excel_path)}'.")
+        logger.warning("No visible non-empty worksheets — falling back to pandas.")
+        df = pd.read_excel(excel_path, engine="openpyxl")
+        df.to_csv(csv_path, index=False, encoding=ENCODING)
+        logger.info("Conversion to meta.csv completed (pandas fallback).")
+        return
 
-    logger.info(f"Using worksheet: {ws.title}")
-
-    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+    with open(csv_path, "w", newline="", encoding=ENCODING) as f:
         writer = csv.writer(f)
         for row in ws.iter_rows(values_only=True):
             writer.writerow(["" if v is None else str(v) for v in row])
 
     logger.info("Conversion to meta.csv completed.")
 
+
+# ------------------------------------------------------------
+# CSV validation and sanitization
+# ------------------------------------------------------------
 def validate_and_fix_meta(csv_path: str, logger: logging.Logger) -> bool:
-    """
-    Validates meta.csv:
-    - Header must match REQUIRED_COLUMNS (in order, case-insensitive)
-    - Rows with any data must have all required fields filled
-    - copies == '' or '0' -> set to '1'
-    - filename without '.stl' (case-insensitive) -> append '.stl'
-    Returns True if validation passes, False otherwise.
-    """
     logger.info("Validating meta.csv...")
+    check_cancel()
 
-    errors: list[str] = []
-    fixed_copies = 0
-    fixed_filenames = 0
-
-    # Read
-    with open(csv_path, newline="", encoding="utf-8-sig") as f:
+    with open(csv_path, newline="", encoding=ENCODING) as f:
         reader = csv.DictReader(f)
         rows = list(reader)
         header = reader.fieldnames
 
     if header is None:
-        print("Validation failed: meta.csv has no header row.")
-        logger.error("Validation failed: no header row in meta.csv")
+        logger.error("meta.csv has no header row.")
         return False
 
-    normalized_header = [h.strip().lower() for h in header[:len(REQUIRED_COLUMNS)]]
-    if normalized_header != REQUIRED_COLUMNS:
-        print("Validation failed: header mismatch.")
-        print("Found header:", header)
-        print("Expected:", REQUIRED_COLUMNS)
+    if [h.strip().lower() for h in header[: len(REQUIRED_COLUMNS)]] != REQUIRED_COLUMNS:
         logger.error(f"Header mismatch. Found: {header}, Expected: {REQUIRED_COLUMNS}")
         return False
 
-    # Validate rows
-    for i, row in enumerate(rows, start=2):  # Row numbers starting at 2 (after header)
-        if any((row.get(k) or "").strip() for k in row.keys()):
-            # Check required fields
-            missing = [k for k in REQUIRED_COLUMNS
-                       if not (row.get(k) or "").strip()]
-            if missing:
-                msg = f"Row {i}: missing {', '.join(missing)}"
-                errors.append(msg)
-                logger.error(msg)
+    fixed_copies, fixed_filenames = 0, 0
+    for i, row in enumerate(rows, start=2):
+        check_cancel()
+        if not any((row.get(k) or "").strip() for k in row.keys()):
+            continue
 
-            # Fix copies
-            val = (row.get("copies") or "").strip()
-            if val == "" or val == "0":
-                row["copies"] = "1"
-                fixed_copies += 1
+        if (row.get("copies") or "").strip() in ("", "0"):
+            row["copies"] = "1"
+            fixed_copies += 1
 
-            # Fix filename extension
-            fname = (row.get("filename") or "").strip()
-            if fname and not fname.lower().endswith(".stl"):
-                row["filename"] = fname + ".stl"
-                fixed_filenames += 1
+        fname = (row.get("filename") or "").strip()
+        if fname and not fname.lower().endswith(".stl"):
+            row["filename"] = fname + ".stl"
+            fixed_filenames += 1
 
-    # Rewrite file if we made fixes
     if fixed_copies or fixed_filenames:
-        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+        with open(csv_path, "w", newline="", encoding=ENCODING) as f:
             writer = csv.DictWriter(f, fieldnames=REQUIRED_COLUMNS)
             writer.writeheader()
             writer.writerows(rows)
         if fixed_copies:
-            msg = f"Corrected {fixed_copies} row(s) with copies=0 or empty."
-            print(msg)
-            logger.info(msg)
+            logger.info(f"Corrected {fixed_copies} copies field(s).")
         if fixed_filenames:
-            msg = f"Corrected {fixed_filenames} row(s) missing .stl in filename."
-            print(msg)
-            logger.info(msg)
+            logger.info(f"Added missing .stl to {fixed_filenames} filename(s).")
 
-    if errors:
-        print("Validation failed:")
-        for e in errors:
-            print(" ", e)
-        logger.error("Validation failed with errors.")
-        return False
-
-    print("Validation passed.")
     logger.info("meta.csv passed validation.")
     return True
 
 
-def find_stl_folder(workdir: str, logger: logging.Logger) -> str | None:
-    """
-    Find first subfolder containing at least one .stl file.
-    """
-    for name in sorted(os.listdir(workdir)):
-        path = os.path.join(workdir, name)
-        if os.path.isdir(path):
-            for fname in os.listdir(path):
-                if fname.lower().endswith(".stl"):
-                    logger.info(f"Found STL folder: {path}")
-                    return path
-    logger.error("No STL folder found.")
-    return None
+# ------------------------------------------------------------
+# ZIP creation with 900 MB cap
+# ------------------------------------------------------------
+def zip_with_limit(file_list, base_dir, zip_base_name, meta_path, workdir, logger):
+    """Split zips when exceeding 900 MB."""
+    check_cancel()
+    current_index = 1
+    current_size = 0
+    zip_paths = []
+    zf = None
+
+    def start_new_zip():
+        nonlocal current_index, current_size, zf
+        zip_name = f"{zip_base_name}_part{current_index}.zip"
+        zip_path = os.path.join(workdir, zip_name)
+        zf = zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED)
+        zip_paths.append(zip_path)
+        current_size = 0
+        logger.info(f"Started new archive: {zip_name}")
+        return zip_path
+
+    start_new_zip()
+    for filename in file_list:
+        check_cancel()
+        full_path = os.path.join(base_dir, filename)
+        if not os.path.isfile(full_path):
+            continue
+        size = os.path.getsize(full_path)
+        if current_size + size > MAX_ZIP_SIZE_BYTES:
+            zf.write(meta_path, "meta.csv")
+            zf.close()
+            current_index += 1
+            start_new_zip()
+        zf.write(full_path, os.path.basename(filename))
+        current_size += size
+
+    zf.write(meta_path, "meta.csv")
+    zf.close()
+    return zip_paths
 
 
-def zip_stl_folder(stl_folder: str, zip_path: str, logger: logging.Logger) -> None:
-    """
-    Create a zip archive of all files in the STL folder directly at the root level (no subfolder).
-    """
-    logger.info(f"Creating zip archive {zip_path} from {stl_folder}")
-    base_folder = os.path.abspath(stl_folder)
-
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, dirs, files in os.walk(base_folder):
-            for filename in files:
-                full_path = os.path.join(root, filename)
-                # Compute path relative to the STL folder itself, not its parent
-                rel_path = os.path.relpath(full_path, base_folder)
-                zf.write(full_path, rel_path)
-
-    logger.info("Zip creation completed.")
-
-
-
+# ------------------------------------------------------------
+# Main converter logic
+# ------------------------------------------------------------
 def main() -> int:
     workdir = get_working_dir()
     log_path = os.path.join(workdir, "converter_log.txt")
@@ -268,121 +199,135 @@ def main() -> int:
     print("Converter started.")
     print()
 
-    success = False
-    meta_path = os.path.join(workdir, "meta.csv")
-
     try:
-        # Step 1: Find Excel file
-        excel_path = find_excel_file(workdir)
+        # Step 1 – Find Excel
+        check_cancel()
+        excel_path = next(
+            (os.path.join(workdir, f) for f in sorted(os.listdir(workdir))
+             if f.lower().endswith((".xlsx", ".xlsm"))),
+            None,
+        )
         if not excel_path:
-            msg = "No Excel file (.xlsx or .xlsm) found in this folder."
-            print(msg)
-            logger.error(msg)
+            logger.error("No Excel file found.")
             return 1
-
         basename = os.path.splitext(os.path.basename(excel_path))[0]
-        print(f"Found Excel file: {os.path.basename(excel_path)}")
         logger.info(f"Found Excel file: {excel_path}")
 
-        # Step 2: Convert Excel to meta.csv
-        print("Converting Excel to meta.csv...")
+        # Step 2 – Convert Excel → CSV
+        check_cancel()
+        meta_path = os.path.join(workdir, "meta.csv")
         convert_excel_to_csv(excel_path, meta_path, logger)
-        if not os.path.exists(meta_path):
-            msg = "Conversion failed: meta.csv was not created."
-            print(msg)
-            logger.error(msg)
-            return 1
-        print("Conversion successful.")
-        print()
 
-        # Step 3: Validate meta.csv
+        # Step 3 – Validate meta
+        check_cancel()
         print("Validating meta.csv...")
+        logger.info("=== START VALIDATION ===")
         if not validate_and_fix_meta(meta_path, logger):
-            print("Validation failed — see converter_log.txt for details.")
+            print("Validation failed - see converter_log.txt for details.")
             return 1
         print()
 
-        # Step 4: Find STL folder
-        stl_folder = find_stl_folder(workdir, logger)
-        if not stl_folder:
-            print("No folder with STL files found.")
-            if os.path.exists(meta_path):
-                os.remove(meta_path)
+        # Step 4 – Locate STL files
+        check_cancel()
+        logger.info("=== START SCANNING FOR STL FILES ===")
+        logger.info("Scanning for STL files in root and subfolders...")
+        stl_folders, root_stls = [], []
+        for entry in sorted(os.listdir(workdir)):
+            check_cancel()
+            p = os.path.join(workdir, entry)
+            if os.path.isdir(p):
+                if any(f.lower().endswith(".stl") for f in os.listdir(p)):
+                    stl_folders.append(p)
+            elif entry.lower().endswith(".stl"):
+                root_stls.append(entry)
+
+        total = len(root_stls) + sum(
+            1 for f in stl_folders for fn in os.listdir(f) if fn.lower().endswith(".stl")
+        )
+        if total == 0:
+            logger.error("No STL files found.")
             return 1
-        print(f"STL folder found: {os.path.basename(stl_folder)}")
+
+        logger.info(f"Found {total} STL file(s) in total.")
+        print(f"Found {total} STL files.")
         print()
 
-        # Step 5: Copy meta.csv into STL folder
-        target_meta = os.path.join(stl_folder, "meta.csv")
+        # Step 5 – Temp folder for meta
+        temp_dir = os.path.join(workdir, "_temp_converter")
+        os.makedirs(temp_dir, exist_ok=True)
+        target_meta = os.path.join(temp_dir, "meta.csv")
         shutil.copy2(meta_path, target_meta)
-        logger.info(f"Copied meta.csv to {target_meta}")
 
-        # Step 6: Create zip archive
-        zip_name = f"{basename}.zip"
-        zip_path = os.path.join(workdir, zip_name)
-        print(f"Creating archive: {zip_name}...")
-        zip_stl_folder(stl_folder, zip_path, logger)
+        # Step 6 – Create ZIPs (folders + root)
+        logger.info("=== START PACKAGING ===")
+        logger.info("Creating ZIP(s) with 900 MB limit...")
+        for stl_folder in stl_folders:
+            check_cancel()
+            folder_name = os.path.basename(stl_folder)
+            logger.info(f"Packaging folder: {stl_folder}")
+            print(f"Packaging folder '{folder_name}'...")
+            files = [f for f in os.listdir(stl_folder) if f.lower().endswith(".stl")]
+            zip_paths = zip_with_limit(files, stl_folder, f"{basename}_{folder_name}",
+                                       target_meta, workdir, logger)
+            for zp in zip_paths:
+                logger.info(f"Created archive: {zp} ({os.path.getsize(zp)/1024/1024:.2f} MB)")
 
-        if not os.path.exists(zip_path):
-            msg = "Failed to create ZIP archive."
-            print(msg)
-            logger.error(msg)
-            return 1
+        if root_stls:
+            check_cancel()
+            logger.info(f"Packaging root STL files ({len(root_stls)} parts)...")
+            print(f"Packaging root STL files ({len(root_stls)} parts)...")
+            zip_paths = zip_with_limit(root_stls, workdir, f"{basename}_root",
+                                       target_meta, workdir, logger)
+            for zp in zip_paths:
+                logger.info(f"Created archive: {zp} ({os.path.getsize(zp)/1024/1024:.2f} MB)")
 
-        print(f"Created archive: {zip_name}")
-        logger.info(f"Created archive: {zip_path}")
-        print()
-
-        # Step 7: Cleanup
-        if os.path.exists(target_meta):
-            os.remove(target_meta)
-        if os.path.exists(meta_path):
-            os.remove(meta_path)
-        print("Cleanup complete.")
+        # Step 7 – Cleanup
+        check_cancel()
+        logger.info("=== START CLEANUP ===")
+        shutil.rmtree(temp_dir, ignore_errors=True)
         logger.info("Cleanup complete.")
-        success = True
+        print("Cleanup complete.")
         return 0
 
+    except RuntimeError as e:
+        logger.warning(str(e))
+        print(str(e))
+        return 1
     except Exception as e:
-        logger.exception("Unexpected error occurred.")
-        print("An unexpected error occurred:")
-        print(repr(e))
+        logger.exception("Unexpected error.")
+        print(f"Unexpected error: {e}")
         return 1
     finally:
         logger.info("Converter finished.")
+        # --- Cleanup leftover temp files after run ---
+        try:
+            safe_delete(os.path.join(workdir, "meta.csv"), logger)
+            safe_delete(os.path.join(workdir, "converter_log.txt"), logger)
+            for f in os.listdir(workdir):
+                if f.lower().startswith("_cleaned_") and f.lower().endswith((".xlsx", ".xlsm")):
+                    safe_delete(os.path.join(workdir, f), logger)
+        except Exception as e:
+            logger.warning(f"Post-cleanup failed: {e}")
 
-        for handler in logger.handlers[:]:
+        for h in logger.handlers[:]:
             try:
-                handler.flush()
-                handler.close()
+                h.flush(); h.close()
             except Exception:
                 pass
-        logger.handlers.clear()
         logging.shutdown()
 
-        #if success and os.path.exists(log_path):
-        #    schedule_log_cleanup(log_path)
-        #    print("(Temporary log file scheduled for cleanup.)")
-        #elif not success:
-        #    print("(Conversion failed or canceled — log file kept for review.)")
+        def safe_delete(path: str, logger: logging.Logger | None = None):
+            """Try deleting a file, log but ignore errors."""
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                    if logger:
+                        logger.info(f"Deleted temporary file: {os.path.basename(path)}")
+            except Exception as e:
+                if logger:
+                    logger.warning(f"Could not delete {path}: {e}")
+
+
 
 if __name__ == "__main__":
-    try:
-        exit_code = main()
-    except Exception:
-        logging.exception("Fatal unhandled error in converter.")
-        exit_code = 1
-
-    # Give filesystem time to flush deletions (especially for PyInstaller)
-    import time
-    time.sleep(0.2)
-
-    try:
-        if sys.stdin is None or not sys.stdin.isatty():
-            time.sleep(2)
-        else:
-            input("Press Enter to exit...")
-    except Exception:
-        pass
-
-    sys.exit(exit_code)
+    sys.exit(main())
