@@ -8,3 +8,4 @@ converter_log.txt
 build/
 *.spec
 *.exe
+dist/
