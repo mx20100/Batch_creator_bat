@@ -335,7 +335,7 @@ def main(external_logger: logging.Logger | None = None) -> int:
                 if f.lower().startswith("_cleaned_") and f.lower().endswith((".xlsx", ".xlsm")):
                     try:
                         os.remove(os.path.join(workdir, f))
-                        logger.info(f"Deleted temop file: {f}")
+                        logger.info(f"Deleted temp file: {f}")
                     except Exception:
                         logger.warning(f"Could not delete {f}: {e}")
 
