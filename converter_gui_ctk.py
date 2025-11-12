@@ -1,41 +1,31 @@
 import os
-import sys
-import csv
-import zipfile
-import shutil
+import threading
 import logging
-from typing import Optional, List, Dict, Tuple
-import converter
-
+import io
 import customtkinter as ctk
-import pandas as pd
-from openpyxl import load_workbook
+import converter
 
 
 APP_TITLE = "AM-Flow Converter"
-
-REQUIRED_COLUMNS = [
-    "batch",
-    "filename",
-    "material",
-    "part_id",
-    "copies",
-    "next_step",
-    "order_id",
-    "technology",
-]
-
-MAX_STL_PER_ZIP = 100
 ENCODING = "utf-8"
-MAX_ZIP_SIZE_MB = 900
-MAX_ZIP_SIZE_BYTES = MAX_ZIP_SIZE_MB * 1024 * 1024
+
+
+class InMemoryLogHandler(logging.Handler):
+    """A handler that forwards log lines to the GUI directly."""
+    def __init__(self, gui_ref):
+        super().__init__()
+        self.gui_ref = gui_ref
+
+    def emit(self, record):
+        msg = self.format(record)
+        self.gui_ref.append_text(msg)
 
 
 class ConverterGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        # --- General window setup ---
+        # --- Window setup ---
         ctk.set_appearance_mode("system")
         ctk.set_default_color_theme("dark-blue")
 
@@ -45,14 +35,13 @@ class ConverterGUI(ctk.CTk):
 
         self.running = False
         self.cancel_requested = False
-        self.logger: Optional[logging.Logger] = None
-        self.log_path: Optional[str] = None
+        self.logger = None
 
-        # --- Layout: 3 rows: header, log area, controls ---
+        # --- Layout ---
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
 
-        # --- Header / status ---
+        # --- Header ---
         self.header_frame = ctk.CTkFrame(self)
         self.header_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
         self.header_frame.grid_columnconfigure(0, weight=1)
@@ -68,7 +57,7 @@ class ConverterGUI(ctk.CTk):
         self.status_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
 
         self.progress_label = ctk.CTkLabel(
-            self.header_frame, text="Step 0 of 0", font=("Segoe UI", 11)
+            self.header_frame, text="Idle", font=("Segoe UI", 11)
         )
         self.progress_label.grid(row=2, column=0, sticky="w", pady=(3, 0))
 
@@ -76,7 +65,7 @@ class ConverterGUI(ctk.CTk):
         self.progress_bar.grid(row=3, column=0, sticky="ew", pady=(4, 0))
         self.progress_bar.set(0.0)
 
-        # --- Log / message area ---
+        # --- Log area ---
         self.textbox = ctk.CTkTextbox(self, wrap="word")
         self.textbox.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
         self.textbox.configure(state="disabled")
@@ -102,17 +91,14 @@ class ConverterGUI(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # --- GUI helpers ---
-
-    def append_text(self, message: str) -> None:
+    def append_text(self, message: str):
         self.textbox.configure(state="normal")
-        self.textbox.insert("end", message + "\n")
+        self.textbox.insert("end", message.strip() + "\n")
         self.textbox.see("end")
         self.textbox.configure(state="disabled")
 
-    def set_status(self, message: str) -> None:
+    def set_status(self, message: str):
         self.status_label.configure(text=message)
-
-    # --- Button events ---
 
     def on_cancel(self):
         if self.running:
@@ -128,9 +114,7 @@ class ConverterGUI(ctk.CTk):
         else:
             self.destroy()
 
-    # --- Conversion orchestration ---
-
-    def start_conversion(self) -> None:
+    def start_conversion(self):
         if self.running:
             return
         self.running = True
@@ -143,25 +127,33 @@ class ConverterGUI(ctk.CTk):
 
         self.after(50, self.run_conversion)
 
-    def run_conversion(self) -> None:
-        import threading, time, re
+    def run_conversion(self):
+        import threading
+        import io
+        import re
+        import time
 
-        workdir = converter.get_working_dir()
-        log_path = os.path.join(workdir, "converter_log.txt")
-        self.log_path = log_path
-        self.logger = converter.setup_logger(log_path)
+        # Prepare in-memory log stream
+        log_stream = io.StringIO()
+        handler = logging.StreamHandler(log_stream)
+        handler.setFormatter(logging.Formatter("%(message)s"))
 
-        self.append_text("Converter started.")
-        self.append_text(f"Working directory: {workdir}")
+        # Use the same logger as the converter
+        converter_logger = logging.getLogger("converter")
+        converter_logger.setLevel(logging.INFO)
+        converter_logger.handlers.clear()
+        converter_logger.addHandler(handler)
+
+        self.append_text("Converter started (RAM mode).")
         self.set_status("Running converter...")
         self.progress_bar.set(0.0)
         self.progress_label.configure(text="Starting...")
         self.update_idletasks()
 
-        # --- Run converter backend in a background thread ---
-        def run_backend():
+        # --- Backend Thread ---
+        def backend_task():
             try:
-                exit_code = converter.main()
+                exit_code = converter.main(converter_logger)
                 if exit_code == 0:
                     self.set_status("All tasks completed successfully.")
                     self.progress_bar.set(1.0)
@@ -183,81 +175,57 @@ class ConverterGUI(ctk.CTk):
                 self.cancel_button.configure(state="disabled")
                 self.close_button.configure(state="normal")
 
-        backend_thread = threading.Thread(target=run_backend, daemon=True)
+        backend_thread = threading.Thread(target=backend_task, daemon=True)
         backend_thread.start()
 
-        # --- Tail the log and update GUI dynamically ---
+        # --- Live GUI updates from log stream ---
         def tail_log():
             last_pos = 0
-            progress = 0.0
             last_stage = ""
-            try:
-                while backend_thread.is_alive() or os.path.exists(log_path):
-                    if os.path.exists(log_path):
-                        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-                            f.seek(last_pos)
-                            new_lines = f.read()
-                            last_pos = f.tell()
-                            if new_lines.strip():
-                                clean_lines = re.sub(
-                                    r"^\d{4}-\d{2}-\d{2} .*?\] ", "", new_lines, flags=re.MULTILINE
-                                )
-                                self.append_text(clean_lines.strip())
 
-                                # --- Heuristic progress tracking with immediate stage locking ---
-                                text = new_lines.lower()
-                                updated = False
+            progress_map = {
+                "found excel": (0.15, "Found Excel file"),
+                "converting excel": (0.25, "Converting Excel to CSV"),
+                "validating meta": (0.45, "Validating meta.csv"),
+                "scanning for stl": (0.60, "Scanning STL files"),
+                "creating zip": (0.75, "Packaging ZIP archives"),
+                "cleanup complete": (0.95, "Finalizing"),
+                "converter finished": (1.0, "Completed"),
+            }
 
-                                # Detect new stage markers before any other messages
-                                if "=== start validation" in text:
-                                    progress, label = 0.45, "Validating meta.csv"
-                                    updated = True
-                                elif "=== start scanning for stl files" in text:
-                                    progress, label = 0.60, "Scanning STL files"
-                                    updated = True
-                                elif "=== start packaging" in text:
-                                    progress, label = 0.75, "Packaging ZIP archives"
-                                    updated = True
-                                elif "=== start cleanup" in text:
-                                    progress, label = 0.95, "Finalizing"
-                                    updated = True
-                                elif "converter finished" in text or "all zip creation completed" in text:
-                                    progress, label = 1.0, "Completed"
-                                    updated = True
+            while backend_thread.is_alive():
+                log_text = log_stream.getvalue()
+                new_text = log_text[last_pos:]
+                last_pos = len(log_text)
 
-                                # Fallback: legacy text search (but only if no stage marker triggered)
-                                if not updated:
-                                    if "found excel" in text:
-                                        progress, label = 0.15, "Found Excel file"
-                                    elif "converting excel" in text:
-                                        progress, label = 0.25, "Converting Excel to CSV"
-                                    elif "validating meta" in text:
-                                        progress, label = 0.45, "Validating meta.csv"
-                                    elif (
-                                        "creating zip" in text
-                                        or "creating archive" in text
-                                        or "started new archive" in text
-                                        or "created archive" in text
-                                    ):
-                                        progress, label = 0.75, "Packaging ZIP archives"
-                                    elif "cleanup complete" in text:
-                                        progress, label = 0.95, "Finalizing"
-                                    else:
-                                        label = last_stage
+                if new_text.strip():
+                    # Remove timestamps and clean lines
+                    clean_lines = re.sub(r"^\d{4}-\d{2}-\d{2} .*?\] ", "", new_text, flags=re.MULTILINE)
+                    self.append_text(clean_lines.strip())
 
-                                # Update GUI only when the label actually changes
-                                if label != last_stage:
-                                    self.progress_label.configure(text=label)
-                                    last_stage = label
-                                    self.progress_bar.set(progress)
-                                    self.update_idletasks()
+                    # Check for progress hints
+                    lower_text = clean_lines.lower()
+                    for key, (val, label) in progress_map.items():
+                        if key in lower_text and label != last_stage:
+                            self.progress_bar.set(val)
+                            self.progress_label.configure(text=label)
+                            self.update_idletasks()
+                            last_stage = label
+                            break
 
-                    time.sleep(0.3)
-            except Exception as e:
-                self.append_text(f"Log reader error: {e}")
+                time.sleep(0.2)
+
+            # Final read when thread completes
+            remaining = log_stream.getvalue()[last_pos:]
+            if remaining.strip():
+                clean_lines = re.sub(r"^\d{4}-\d{2}-\d{2} .*?\] ", "", remaining, flags=re.MULTILINE)
+                self.append_text(clean_lines.strip())
+
+            self.progress_bar.set(1.0)
+            self.set_status("Done.")
+            self.progress_label.configure(text="Completed")
 
         threading.Thread(target=tail_log, daemon=True).start()
-
 
 def main():
     app = ConverterGUI()
