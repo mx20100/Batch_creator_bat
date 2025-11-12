@@ -170,48 +170,85 @@ def validate_and_fix_meta_buffer(csv_buffer: io.StringIO, logger: logging.Logger
 # ------------------------------------------------------------
 # ZIP packaging (RAM meta)
 # ------------------------------------------------------------
+import time
+import zipfile
+import os
+
 def zip_with_limit(file_list, base_dir, zip_base_name, meta_buf, workdir, logger):
-    """Create zip files with 900MB limit, embedding meta.csv from memory."""
-    check_cancel()
-    current_index = 1
-    current_size = 0
-    zf = None
+    """
+    Create one or more ZIPs (900 MB each) for the given STL files.
+    Files are read from `base_dir`, but ZIPs are always written to `workdir`.
+    """
+    import time
+    MAX_ZIP_SIZE_MB = 900
+    MAX_ZIP_SIZE_BYTES = MAX_ZIP_SIZE_MB * 1024 * 1024
+
+    os.makedirs(workdir, exist_ok=True)
     zip_paths = []
 
-    def start_new_zip():
-        nonlocal current_index, current_size, zf
-        zip_name = f"{zip_base_name}_part{current_index}.zip"
+    current_zip_index = 1
+    current_zip = None
+    current_size = 0
+    start_time = time.time()
+
+    def new_zip():
+        nonlocal current_zip, current_zip_index, current_size
+        zip_name = f"{zip_base_name}_part{current_zip_index}.zip"
         zip_path = os.path.join(workdir, zip_name)
-        zf = zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED)
+        current_zip = zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED)
         zip_paths.append(zip_path)
         current_size = 0
         logger.info(f"Started new archive: {zip_name}")
+        print(f"Started new archive: {zip_name}")
         return zip_path
 
-    start_new_zip()
-    for filename in file_list:
-        check_cancel()
+    # start the first archive
+    new_zip()
+    total_files = len(file_list)
+
+    for i, filename in enumerate(file_list, start=1):
         full_path = os.path.join(base_dir, filename)
         if not os.path.isfile(full_path):
             continue
-        size = os.path.getsize(full_path)
-        if current_size + size > MAX_ZIP_SIZE_BYTES:
-            zf.writestr("meta.csv", meta_buf.getvalue())
-            zf.close()
-            current_index += 1
-            start_new_zip()
-            current_size = 0
-        zf.write(full_path, os.path.basename(filename))
-        current_size += size
+        rel_path = os.path.relpath(full_path, base_dir)
+        file_size = os.path.getsize(full_path)
 
-    zf.writestr("meta.csv", meta_buf.getvalue())
-    zf.close()
+        if current_size + file_size > MAX_ZIP_SIZE_BYTES:
+            # close and start new zip
+            current_zip.close()
+            elapsed = time.time() - start_time
+            size_mb = current_size / (1024 * 1024)
+            logger.info(f"Closed archive {current_zip_index} ({size_mb:.1f} MB in {elapsed:.1f}s, {size_mb/elapsed:.1f} MB/s)")
+            current_zip_index += 1
+            new_zip()
+            start_time = time.time()
+
+        with open(full_path, "rb") as f:
+            data = f.read()
+        current_zip.writestr(rel_path, data)
+        current_size += file_size
+
+        if i % 50 == 0 or i == total_files:
+            print(f"Added {i}/{total_files} files so far...")
+            logger.info(f"Added {i}/{total_files} files so far...")
+
+    # finalize last archive
+    if meta_buf:
+        current_zip.writestr("meta.csv", meta_buf.getvalue())
+    current_zip.close()
+
+    elapsed = time.time() - start_time
+    size_mb = current_size / (1024 * 1024)
+    logger.info(f"Closed archive: {zip_paths[-1]} ({size_mb:.1f} MB in {elapsed:.1f}s, {size_mb/elapsed:.1f} MB/s)")
+    print(f"Closed archive: {os.path.basename(zip_paths[-1])} ({size_mb:.1f} MB in {elapsed:.1f}s, {size_mb/elapsed:.1f} MB/s)")
+
     return zip_paths
 
 # ------------------------------------------------------------
 # Main
 # ------------------------------------------------------------
 def main(external_logger: logging.Logger | None = None) -> int:
+    log_path = None
     workdir = get_working_dir()
 
     if external_logger:
@@ -293,19 +330,24 @@ def main(external_logger: logging.Logger | None = None) -> int:
         return 1
     finally:
         # Automatic cleanup — also remove log file & cleaned sheets
-        for f in os.listdir(workdir):
-            if f.lower().startswith("_cleaned_") and f.lower().endswith((".xlsx", ".xlsm")):
-                try:
-                    os.remove(os.path.join(workdir, f))
-                    logger.info(f"Deleted temp file: {f}")
-                except OSError:
-                    pass
+        try:
+            for f in os.listdir(workdir):
+                if f.lower().startswith("_cleaned_") and f.lower().endswith((".xlsx", ".xlsm")):
+                    try:
+                        os.remove(os.path.join(workdir, f))
+                        logger.info(f"Deleted temop file: {f}")
+                    except Exception:
+                        logger.warning(f"Could not delete {f}: {e}")
 
-        if os.path.exists(log_path):
-            try:
-                os.remove(log_path)
-            except OSError:
-                pass
+            if log_path and os.path.exists(log_path):
+                try:
+                    os.remove(log_path)
+                    logger.info(f"Deleted log file: {log_path}")
+                except Exception as e:
+                    logger.warning(f"Could not delete log file: {e}")
+
+        except Exception as cleanup_error:
+            logger.warning(f"Cleanup encountered error: {cleanup_error}")
 
         logger.info("Converter finished.")
 
