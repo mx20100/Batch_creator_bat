@@ -1,8 +1,8 @@
 # AM-Flow Converter
 
-A lightweight Windows application that converts AM-Flow Excel batch sheets into properly structured ZIP packages for uploading to AM-Vision, AM-Quality, or AM-Sort.
+A lightweight Windows application that converts AM-Flow Excel batch sheets into properly structured ZIP packages for uploading to AM-Vision.
 
-This tool is built for internal AM-Flow use — no Python installation required.
+This tool is built for internal AM-Flow use. No installation required.
 
 ---
 
@@ -11,7 +11,7 @@ This tool is built for internal AM-Flow use — no Python installation required.
 You can download the latest version from the Releases page:
 
 → Go to the **Releases** tab on the right side of this GitHub repository  
-and download **AM-Flow Converter.exe**
+and download **AM-Flow_Converter.exe**
 
 ---
 
@@ -26,7 +26,7 @@ and download **AM-Flow Converter.exe**
 - Checks all required columns  
 - Fixes empty or zero copies  
 - Adds missing .stl extensions  
-- Sanitizes filenames (A–Z, 0–9, _, .)  
+- Sanitizes filenames using only the following characters (A–Z, 0–9, _.)  
 - Everything stays in RAM, no temp files created in the batch folder
 
 ### 3. Scans for STL files
@@ -39,25 +39,23 @@ and download **AM-Flow Converter.exe**
 - Always outputs ZIPs to the **root folder**  
 - Automatically splits when a ZIP exceeds **900 MB**  
 - Uses ZIP_STORED for maximum speed  
-- Typical performance: **600–750 MB/s**  
-- Adds meta.csv to every archive  
+- Typical performance on an NVMe drive: **600–750 MB/s**  
+- Adds meta.csv to every archive
+- Splits meta.csv according to which stl files are in which zip folder
 
 ### 5. Uses RAM for temporary work
 - Excel cleanup happens in OS temp directory  
-- No `_temp_converter` or leftover files  
+- No temporary files or folders visible
 - Fast, clean, reliable
 
 ### 6. Real-time GUI
 - Live log of what the converter is doing  
 - Status labels (Excel → Validation → Packaging → Cleanup)  
 - Auto-scrolling text area  
-- Cancel button that safely interrupts the process  
 
 ---
 
 ## Supported Folder Structures
-
-The converter supports all standard AM-Flow STL layouts.
 
 ### 1. All STLs in the root folder
 ```
@@ -142,4 +140,3 @@ You don't need to configure anything. Just run it.
 
 ## Issues or Suggestions
 If something doesn't work or you'd like improvements, contact Max or open an issue on this repository.
-
