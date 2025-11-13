@@ -1,32 +1,145 @@
 # AM-Flow Converter
 
-A self-contained Windows batch script for converting Excel files to validated CSV and packaging STL data for AM-Flow modules.
-This also gives me a better understanding of git and cli commands.
+A lightweight Windows application that converts AM-Flow Excel batch sheets into properly structured ZIP packages for uploading to AM-Vision, AM-Quality, or AM-Sort.
 
-## Features
-- Supports `.xlsx` and `.xlsm`
-- Automatically installs `xlsx2csv`
-- Validates required columns
-- Fixes `copies=0` → `1`
-- Finds STL folders and zips everything
-- Cleans up temporary files and logs
+This tool is built for internal AM-Flow use — no Python installation required.
 
-## Requirements
-- Windows 10/11
-- Python 3.10+ installed and added to PATH  
-  (the script will guide users if it’s missing)
+---
 
-## Usage
-1. Place your Excel file and STL folder in the same directory as `converter.bat`.
-2. Double-click the batch file.
-3. A `.zip` with the same name as your Excel file will be created.
+## Download (EXE)
 
-## Validation
-Each Excel file must contain the following columns (in order):
-batch, filename, material, part_id, copies, next_step, order_id, technology
+You can download the latest version from the Releases page:
 
-Rows with empty required fields will fail validation.
+→ Go to the **Releases** tab on the right side of this GitHub repository  
+and download **AM-Flow Converter.exe**
 
-## Notes
-- The script deletes all temporary files automatically.
-- To keep logs, comment out the `del "%logfile%"` line at the end.
+---
+
+## What the Converter Does
+
+### 1. Reads your Excel (.xlsx or .xlsm)
+- Detects the first non-empty visible sheet  
+- Removes empty sheets automatically  
+- Converts it to meta.csv (in memory)
+
+### 2. Validates and fixes meta.csv
+- Checks all required columns  
+- Fixes empty or zero copies  
+- Adds missing .stl extensions  
+- Sanitizes filenames (A–Z, 0–9, _, .)  
+- Everything stays in RAM, no temp files created in the batch folder
+
+### 3. Scans for STL files
+- Reads STL files in the root folder  
+- Reads STL files in material-named subfolders  
+- Supports mixed structures (root + subfolders)  
+- Ignores unrelated folders automatically
+
+### 4. Creates ZIP archives
+- Always outputs ZIPs to the **root folder**  
+- Automatically splits when a ZIP exceeds **900 MB**  
+- Uses ZIP_STORED for maximum speed  
+- Typical performance: **600–750 MB/s**  
+- Adds meta.csv to every archive  
+
+### 5. Uses RAM for temporary work
+- Excel cleanup happens in OS temp directory  
+- No `_temp_converter` or leftover files  
+- Fast, clean, reliable
+
+### 6. Real-time GUI
+- Live log of what the converter is doing  
+- Status labels (Excel → Validation → Packaging → Cleanup)  
+- Auto-scrolling text area  
+- Cancel button that safely interrupts the process  
+
+---
+
+## Supported Folder Structures
+
+The converter supports all standard AM-Flow STL layouts.
+
+### 1. All STLs in the root folder
+```
+/BatchFolder
+20250101_01.xlsx
+part1.stl
+part2.stl
+part3.stl
+```
+### 2. STLs inside material-named subfolders
+```
+/BatchFolder
+20250101_01.xlsx
+/PA12_BLUE
+part1.stl
+part2.stl
+/TPU
+fileA.stl
+fileB.stl
+```
+### 3. Mixed root + subfolders (supported)
+```
+/BatchFolder
+20250101_01.xlsx
+loosePart1.stl
+loosePart2.stl
+/PA12_BLUE
+  p1.stl
+  p2.stl
+```
+### 4. Multiple material folders
+```
+/BatchFolder
+20250101_01.xlsx
+/PA12_BLUE
+/PA11_BLACK
+/TPU
+```
+
+### 5. Unrelated folders are ignored
+Only folders containing STL files are considered.
+
+---
+
+## How to Use
+
+1. Place your Excel sheet and STL files together in a folder.
+2. Run **AM-Flow Converter.exe** inside that folder.
+3. The converter:
+   - Reads and validates your Excel
+   - Builds meta.csv in RAM
+   - Scans all STLs (root + subfolders)
+   - Creates the ZIP files
+   - Places all ZIPs in the root folder
+
+You don't need to configure anything. Just run it.
+
+---
+
+## Highlighted Features
+
+| Feature | Description |
+|--------|-------------|
+| Very fast ZIP creation | RAM + ZIP_STORED = high throughput |
+| 900 MB safety cap | Prevents upload errors |
+| RAM-only temp handling | No leftover files |
+| Supports all folder layouts | Seamless operation |
+| In-memory meta.csv | No file pollution |
+| Real-time UI | See progress clearly |
+| One-click workflow | Nothing to configure |
+
+---
+
+## Example Output
+```
+20250101_01_PA12_BLUE_part1.zip
+20250101_01_PA12_BLUE_part2.zip
+20250101_01_root_part1.zip
+```
+
+---
+
+## Issues or Suggestions
+If something doesn't work or you'd like improvements, contact Max or open an issue on this repository.
+
